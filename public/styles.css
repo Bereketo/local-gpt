@@ -386,7 +386,8 @@ textarea:focus {
 }
 
 .model-strip,
-.setup-guide {
+.setup-guide,
+.model-manager {
   grid-column: 1 / -1;
 }
 
@@ -449,6 +450,39 @@ textarea:focus {
   color: #d7fbe9;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
   font-size: 12px;
+}
+
+.model-manager {
+  display: grid;
+  grid-template-columns: minmax(220px, 360px) auto auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: end;
+  padding-top: 2px;
+}
+
+.model-manager label {
+  min-width: 0;
+}
+
+.model-manager .ghost-button {
+  min-width: 92px;
+}
+
+.model-manager span {
+  align-self: center;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.model-manager.read-only {
+  display: block;
+  padding-top: 0;
+}
+
+button:disabled,
+input:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
 }
 
 .messages {
@@ -680,7 +714,8 @@ textarea {
   }
 
   .setup-panel,
-  .setup-guide {
+  .setup-guide,
+  .model-manager {
     grid-template-columns: 1fr;
   }
 

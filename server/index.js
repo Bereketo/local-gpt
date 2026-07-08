@@ -345,6 +345,91 @@ async function handleModels(req, res) {
   });
 }
 
+async function readProviderAction(req) {
+  const body = await readJson(req);
+  const provider = body.provider ?? "ollama";
+  const baseUrl = resolveBaseUrl(provider, body.baseUrl);
+  const name = typeof body.name === "string" ? body.name.trim() : "";
+
+  if (provider !== "ollama") {
+    return {
+      error: {
+        status: 400,
+        body: { error: "Model management is currently available for Ollama only." }
+      }
+    };
+  }
+
+  if (!name) {
+    return {
+      error: {
+        status: 400,
+        body: { error: "A model name is required." }
+      }
+    };
+  }
+
+  return { baseUrl, name };
+}
+
+async function handlePullModel(req, res) {
+  try {
+    const action = await readProviderAction(req);
+    if (action.error) {
+      sendJson(res, action.error.status, action.error.body);
+      return;
+    }
+
+    const upstream = await fetch(`${action.baseUrl}/api/pull`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: action.name, stream: false })
+    });
+    const data = await upstream.json().catch(() => ({}));
+
+    sendJson(res, upstream.ok ? 200 : upstream.status, {
+      ok: upstream.ok,
+      model: action.name,
+      message: upstream.ok ? `Pulled ${action.name}` : data.error ?? "Model pull failed",
+      details: data
+    });
+  } catch (error) {
+    sendJson(res, 502, {
+      error: "Model pull failed",
+      details: error instanceof Error ? error.message : String(error)
+    });
+  }
+}
+
+async function handleDeleteModel(req, res) {
+  try {
+    const action = await readProviderAction(req);
+    if (action.error) {
+      sendJson(res, action.error.status, action.error.body);
+      return;
+    }
+
+    const upstream = await fetch(`${action.baseUrl}/api/delete`, {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: action.name })
+    });
+    const data = await upstream.json().catch(() => ({}));
+
+    sendJson(res, upstream.ok ? 200 : upstream.status, {
+      ok: upstream.ok,
+      model: action.name,
+      message: upstream.ok ? `Deleted ${action.name}` : data.error ?? "Model delete failed",
+      details: data
+    });
+  } catch (error) {
+    sendJson(res, 502, {
+      error: "Model delete failed",
+      details: error instanceof Error ? error.message : String(error)
+    });
+  }
+}
+
 async function handleHealth(req, res) {
   const query = new URL(req.url, `http://${req.headers.host}`).searchParams;
   const provider = query.get("provider") ?? "ollama";
@@ -496,6 +581,16 @@ const server = createServer(async (req, res) => {
 
   if (req.url?.startsWith("/api/health")) {
     await handleHealth(req, res);
+    return;
+  }
+
+  if (req.url === "/api/models/pull" && req.method === "POST") {
+    await handlePullModel(req, res);
+    return;
+  }
+
+  if (req.url === "/api/models/delete" && req.method === "POST") {
+    await handleDeleteModel(req, res);
     return;
   }
 

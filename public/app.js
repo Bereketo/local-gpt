@@ -37,6 +37,7 @@ let state = loadState();
 let isStreaming = false;
 let currentAbortController = null;
 let providerHealth = null;
+let modelActionRunning = false;
 const saveTimers = new Map();
 
 function loadState() {
@@ -205,6 +206,7 @@ function renderSetupPanel() {
         ? `<div class="model-strip">${topModels.map(renderModelChip).join("")}${models.length > topModels.length ? `<span class="model-chip muted">+${models.length - topModels.length} more</span>` : ""}</div>`
         : renderSetupInstructions(instructions, health)
     }
+    ${renderModelManager(health)}
   `;
 }
 
@@ -231,6 +233,31 @@ function renderSetupInstructions(instructions, health) {
       </div>
       <div class="command-stack">${commandHtml}</div>
       <button class="ghost-button" type="button" data-action="refresh-health">Check again</button>
+    </div>
+  `;
+}
+
+function renderModelManager(health) {
+  if (state.provider !== "ollama") {
+    return `
+      <div class="model-manager read-only">
+        <span>llama.cpp model files are managed outside this app.</span>
+      </div>
+    `;
+  }
+
+  const selectedModel = modelSelect.value;
+  const disabled = modelActionRunning ? "disabled" : "";
+
+  return `
+    <div class="model-manager">
+      <label>
+        Pull model
+        <input id="pullModelInput" type="text" placeholder="llama3.2, qwen2.5, mistral..." autocomplete="off" ${disabled} />
+      </label>
+      <button class="ghost-button" type="button" data-action="pull-model" ${disabled}>Pull</button>
+      <button class="ghost-button danger" type="button" data-action="delete-model" ${disabled || !selectedModel ? "disabled" : ""}>Delete selected</button>
+      <span>${escapeHtml(health?.ok ? "Ollama model library" : "Start Ollama before managing models")}</span>
     </div>
   `;
 }
@@ -575,6 +602,53 @@ async function refreshModels() {
   }
 }
 
+async function runModelAction(action) {
+  if (modelActionRunning) return;
+
+  if (state.provider !== "ollama") {
+    setStatus("Model management is available for Ollama", "error");
+    return;
+  }
+
+  const pullInput = document.querySelector("#pullModelInput");
+  const name = action === "pull-model"
+    ? pullInput?.value.trim()
+    : modelSelect.value;
+
+  if (!name) {
+    setStatus(action === "pull-model" ? "Enter a model name" : "Select a model to delete", "error");
+    return;
+  }
+
+  if (action === "delete-model") {
+    const confirmed = confirm(`Delete "${name}" from Ollama?`);
+    if (!confirmed) return;
+  }
+
+  modelActionRunning = true;
+  setStatus(action === "pull-model" ? `Pulling ${name}...` : `Deleting ${name}...`);
+  renderSetupPanel();
+
+  try {
+    const result = await apiJson(action === "pull-model" ? "/api/models/pull" : "/api/models/delete", {
+      method: "POST",
+      body: JSON.stringify({
+        provider: state.provider,
+        baseUrl: state.endpoints[state.provider],
+        name
+      })
+    });
+    setStatus(result.message ?? "Model action complete", "connected");
+    if (pullInput) pullInput.value = "";
+    await refreshModels();
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : "Model action failed", "error");
+  } finally {
+    modelActionRunning = false;
+    renderSetupPanel();
+  }
+}
+
 function parseOllamaChunk(line) {
   const data = JSON.parse(line);
   if (data.error) throw new Error(data.error);
@@ -735,6 +809,16 @@ deleteChatButton.addEventListener("click", deleteActiveConversation);
 setupPanel.addEventListener("click", (event) => {
   const action = event.target instanceof HTMLElement ? event.target.dataset.action : "";
   if (action === "refresh-health") refreshModels();
+  if (action === "pull-model" || action === "delete-model") runModelAction(action);
+});
+
+setupPanel.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") return;
+  const target = event.target;
+  if (target instanceof HTMLElement && target.id === "pullModelInput") {
+    event.preventDefault();
+    runModelAction("pull-model");
+  }
 });
 
 temperatureInput.addEventListener("input", () => {
