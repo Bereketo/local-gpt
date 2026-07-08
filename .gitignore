@@ -27,6 +27,7 @@ Thumbs.db
 .vscode/
 
 # Local app data
+data/
 *.sqlite
 *.sqlite3
 *.db

@@ -7,10 +7,10 @@ const defaults = {
     "llama.cpp": "http://127.0.0.1:8080"
   },
   selectedModels: {},
-  conversations: [],
   activeConversationId: null,
   temperature: 0.7,
-  contextWindow: 4096
+  contextWindow: 4096,
+  conversationSearch: ""
 };
 
 const providerSelect = document.querySelector("#providerSelect");
@@ -22,6 +22,8 @@ const setupPanel = document.querySelector("#setupPanel");
 const conversationList = document.querySelector("#conversationList");
 const messagesEl = document.querySelector("#messages");
 const newChatButton = document.querySelector("#newChatButton");
+const conversationSearchInput = document.querySelector("#conversationSearchInput");
+const pinChatButton = document.querySelector("#pinChatButton");
 const renameChatButton = document.querySelector("#renameChatButton");
 const deleteChatButton = document.querySelector("#deleteChatButton");
 const composer = document.querySelector("#composer");
@@ -35,6 +37,7 @@ let state = loadState();
 let isStreaming = false;
 let currentAbortController = null;
 let providerHealth = null;
+const saveTimers = new Map();
 
 function loadState() {
   try {
@@ -44,15 +47,24 @@ function loadState() {
       ...parsed,
       endpoints: { ...defaults.endpoints, ...(parsed?.endpoints ?? {}) },
       selectedModels: parsed?.selectedModels ?? {},
-      conversations: parsed?.conversations ?? []
+      conversations: [],
+      legacyConversations: parsed?.conversations ?? []
     };
   } catch {
-    return structuredClone(defaults);
+    return { ...structuredClone(defaults), conversations: [], legacyConversations: [] };
   }
 }
 
 function saveState() {
-  localStorage.setItem(storageKey, JSON.stringify(state));
+  localStorage.setItem(storageKey, JSON.stringify({
+    provider: state.provider,
+    endpoints: state.endpoints,
+    selectedModels: state.selectedModels,
+    activeConversationId: state.activeConversationId,
+    temperature: state.temperature,
+    contextWindow: state.contextWindow,
+    conversationSearch: state.conversationSearch
+  }));
 }
 
 function formatModelSize(bytes) {
@@ -69,33 +81,36 @@ function buildConversation() {
   return {
     id: crypto.randomUUID(),
     title: "New local chat",
+    pinned: false,
     createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
     messages: []
   };
 }
 
-function ensureActiveConversation() {
+async function ensureActiveConversation() {
   if (state.conversations.length === 0) {
-    const conversation = buildConversation();
-    state.conversations.push(conversation);
-    state.activeConversationId = conversation.id;
+    await createConversation();
+    return;
   }
 
   if (!activeConversation()) {
     state.activeConversationId = state.conversations[0].id;
+    saveState();
   }
 }
 
-function createConversation() {
+async function createConversation() {
   const conversation = buildConversation();
   state.conversations.unshift(conversation);
   state.activeConversationId = conversation.id;
   saveState();
   renderConversations();
   renderMessages();
+  await persistConversation(conversation, { immediate: true });
 }
 
-function renameActiveConversation() {
+async function renameActiveConversation() {
   const conversation = activeConversation();
   if (!conversation) return;
 
@@ -103,11 +118,13 @@ function renameActiveConversation() {
   if (!title) return;
 
   conversation.title = title.slice(0, 80);
+  conversation.updatedAt = new Date().toISOString();
   saveState();
   renderConversations();
+  await persistConversation(conversation, { immediate: true });
 }
 
-function deleteActiveConversation() {
+async function deleteActiveConversation() {
   const conversation = activeConversation();
   if (!conversation) return;
 
@@ -115,10 +132,23 @@ function deleteActiveConversation() {
   if (!confirmed) return;
 
   state.conversations = state.conversations.filter((item) => item.id !== conversation.id);
-  ensureActiveConversation();
+  await apiJson(`/api/conversations/${encodeURIComponent(conversation.id)}`, { method: "DELETE" });
+  await ensureActiveConversation();
   saveState();
   renderConversations();
   renderMessages();
+}
+
+async function togglePinActiveConversation() {
+  const conversation = activeConversation();
+  if (!conversation) return;
+
+  conversation.pinned = !conversation.pinned;
+  conversation.updatedAt = new Date().toISOString();
+  sortConversations();
+  saveState();
+  renderConversations();
+  await persistConversation(conversation, { immediate: true });
 }
 
 function setStatus(text, variant = "") {
@@ -206,15 +236,29 @@ function renderSetupInstructions(instructions, health) {
 }
 
 function renderConversations() {
-  ensureActiveConversation();
   conversationList.innerHTML = "";
+  const normalizedSearch = state.conversationSearch.trim().toLowerCase();
+  const conversations = normalizedSearch
+    ? state.conversations.filter((conversation) => {
+        const titleMatch = conversation.title.toLowerCase().includes(normalizedSearch);
+        const messageMatch = conversation.messages.some((message) => message.content.toLowerCase().includes(normalizedSearch));
+        return titleMatch || messageMatch;
+      })
+    : state.conversations;
 
-  for (const conversation of state.conversations) {
+  pinChatButton.textContent = activeConversation()?.pinned ? "Unpin" : "Pin";
+
+  if (conversations.length === 0) {
+    conversationList.innerHTML = `<div class="empty-list">No chats found</div>`;
+    return;
+  }
+
+  for (const conversation of conversations) {
     const button = document.createElement("button");
     button.className = `conversation-item ${conversation.id === state.activeConversationId ? "active" : ""}`;
     button.type = "button";
     button.innerHTML = `
-      <strong>${escapeHtml(conversation.title)}</strong>
+      <strong>${conversation.pinned ? `<span class="pin-dot" aria-hidden="true"></span>` : ""}${escapeHtml(conversation.title)}</strong>
       <span>${conversation.messages.length} messages</span>
     `;
     button.addEventListener("click", () => {
@@ -314,6 +358,7 @@ function editMessage(message) {
   if (index === -1) return;
 
   message.content = edited;
+  conversation.updatedAt = new Date().toISOString();
   if (message.role === "user") {
     conversation.messages = conversation.messages.slice(0, index + 1);
     regenerateAfterLastUser(conversation);
@@ -322,6 +367,7 @@ function editMessage(message) {
 
   saveState();
   renderMessages();
+  persistConversation(conversation);
 }
 
 function regenerateFrom(message) {
@@ -334,6 +380,7 @@ function regenerateFrom(message) {
   if (index <= 0) return;
 
   conversation.messages = conversation.messages.slice(0, index);
+  conversation.updatedAt = new Date().toISOString();
   regenerateAfterLastUser(conversation);
 }
 
@@ -345,9 +392,11 @@ function regenerateAfterLastUser(conversation) {
 
   const assistantMessage = { id: crypto.randomUUID(), role: "assistant", content: "" };
   conversation.messages.push(assistantMessage);
+  conversation.updatedAt = new Date().toISOString();
   saveState();
   renderConversations();
   renderMessages();
+  persistConversation(conversation);
   streamAssistantReply(conversation, assistantMessage);
 }
 
@@ -378,6 +427,96 @@ function syncControls() {
   temperatureInput.value = state.temperature;
   temperatureValue.value = state.temperature;
   contextInput.value = state.contextWindow;
+  conversationSearchInput.value = state.conversationSearch;
+}
+
+async function apiJson(path, options = {}) {
+  const response = await fetch(path, {
+    ...options,
+    headers: {
+      "content-type": "application/json",
+      ...(options.headers ?? {})
+    }
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.details || data.error || `Request failed with ${response.status}`);
+  }
+  return data;
+}
+
+function sortConversations() {
+  state.conversations.sort((a, b) => {
+    if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+    return new Date(b.updatedAt ?? b.createdAt).getTime() - new Date(a.updatedAt ?? a.createdAt).getTime();
+  });
+}
+
+async function loadConversations() {
+  const data = await apiJson("/api/conversations");
+  state.conversations = data.conversations ?? [];
+
+  if (state.conversations.length === 0 && state.legacyConversations.length > 0) {
+    for (const legacyConversation of state.legacyConversations) {
+      const imported = {
+        ...legacyConversation,
+        pinned: Boolean(legacyConversation.pinned),
+        updatedAt: legacyConversation.updatedAt ?? legacyConversation.createdAt ?? new Date().toISOString(),
+        messages: (legacyConversation.messages ?? []).map((message) => ({
+          id: message.id ?? crypto.randomUUID(),
+          role: message.role,
+          content: message.content,
+          createdAt: message.createdAt ?? new Date().toISOString()
+        }))
+      };
+      await persistConversation(imported, { immediate: true });
+    }
+    const migratedData = await apiJson("/api/conversations");
+    state.conversations = migratedData.conversations ?? [];
+    state.legacyConversations = [];
+  }
+
+  sortConversations();
+  await ensureActiveConversation();
+  renderConversations();
+  renderMessages();
+  saveState();
+}
+
+async function persistConversation(conversation, options = {}) {
+  if (!conversation) return;
+
+  window.clearTimeout(saveTimers.get(conversation.id));
+
+  const save = async () => {
+    saveTimers.delete(conversation.id);
+    const payload = {
+      id: conversation.id,
+      title: conversation.title,
+      pinned: Boolean(conversation.pinned),
+      createdAt: conversation.createdAt,
+      messages: conversation.messages
+    };
+    const data = await apiJson(`/api/conversations/${encodeURIComponent(conversation.id)}`, {
+      method: "PUT",
+      body: JSON.stringify(payload)
+    });
+    const index = state.conversations.findIndex((item) => item.id === conversation.id);
+    if (index !== -1) {
+      state.conversations[index] = data.conversation;
+      sortConversations();
+      renderConversations();
+    }
+  };
+
+  if (options.immediate) {
+    await save();
+    return;
+  }
+
+  saveTimers.set(conversation.id, window.setTimeout(() => {
+    save().catch((error) => setStatus(error.message, "error"));
+  }, 350));
 }
 
 async function refreshModels() {
@@ -471,11 +610,13 @@ async function streamChat() {
   if (conversation.title === "New local chat") {
     conversation.title = prompt.slice(0, 56);
   }
+  conversation.updatedAt = new Date().toISOString();
   messageInput.value = "";
   autosizeTextarea();
   saveState();
   renderConversations();
   renderMessages();
+  persistConversation(conversation);
 
   await streamAssistantReply(conversation, assistantMessage);
 }
@@ -522,11 +663,11 @@ async function streamAssistantReply(conversation, assistantMessage) {
       buffer = lines.pop() ?? "";
 
       for (const line of lines) {
-        appendStreamLine(line, assistantMessage);
+        appendStreamLine(line, assistantMessage, conversation);
       }
     }
 
-    appendStreamLine(buffer, assistantMessage);
+    appendStreamLine(buffer, assistantMessage, conversation);
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") {
       assistantMessage.content += assistantMessage.content ? "\n\nStopped." : "Stopped.";
@@ -535,22 +676,26 @@ async function streamAssistantReply(conversation, assistantMessage) {
     }
     saveState();
     renderMessages();
+    persistConversation(conversation, { immediate: true });
   } finally {
     isStreaming = false;
     currentAbortController = null;
     sendButton.textContent = "Send";
+    persistConversation(conversation, { immediate: true }).catch((error) => setStatus(error.message, "error"));
   }
 }
 
-function appendStreamLine(line, assistantMessage) {
+function appendStreamLine(line, assistantMessage, conversation) {
   const trimmed = line.trim();
   if (!trimmed) return;
   const token = state.provider === "llama.cpp"
     ? parseLlamaCppChunk(trimmed)
     : parseOllamaChunk(trimmed);
   assistantMessage.content += token;
+  if (conversation) conversation.updatedAt = new Date().toISOString();
   saveState();
   renderMessages();
+  persistConversation(conversation);
 }
 
 function hasRunnableModel() {
@@ -584,6 +729,7 @@ modelSelect.addEventListener("change", () => {
 
 refreshModelsButton.addEventListener("click", refreshModels);
 newChatButton.addEventListener("click", createConversation);
+pinChatButton.addEventListener("click", togglePinActiveConversation);
 renameChatButton.addEventListener("click", renameActiveConversation);
 deleteChatButton.addEventListener("click", deleteActiveConversation);
 setupPanel.addEventListener("click", (event) => {
@@ -602,6 +748,12 @@ contextInput.addEventListener("change", () => {
   saveState();
 });
 
+conversationSearchInput.addEventListener("input", () => {
+  state.conversationSearch = conversationSearchInput.value;
+  saveState();
+  renderConversations();
+});
+
 messageInput.addEventListener("input", autosizeTextarea);
 messageInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey) {
@@ -615,10 +767,15 @@ composer.addEventListener("submit", (event) => {
   streamChat();
 });
 
-syncControls();
-ensureActiveConversation();
-saveState();
-renderConversations();
-renderMessages();
-renderSetupPanel();
-refreshModels();
+async function initializeApp() {
+  syncControls();
+  renderSetupPanel();
+  await loadConversations();
+  refreshModels();
+}
+
+initializeApp().catch((error) => {
+  setStatus(error.message, "error");
+  renderConversations();
+  renderMessages();
+});

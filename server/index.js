@@ -1,11 +1,14 @@
 import { createServer } from "node:http";
-import { createReadStream, existsSync } from "node:fs";
+import { createReadStream, existsSync, mkdirSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
 const publicDir = path.join(rootDir, "public");
+const dataDir = path.join(rootDir, "data");
+const databasePath = process.env.DATABASE_PATH ?? path.join(dataDir, "local-gpt.sqlite");
 
 const host = process.env.HOST ?? "127.0.0.1";
 const port = Number(process.env.PORT ?? 5173);
@@ -21,6 +24,34 @@ const mimeTypes = new Map([
   [".ico", "image/x-icon"]
 ]);
 
+mkdirSync(dataDir, { recursive: true });
+
+const db = new DatabaseSync(databasePath);
+db.exec(`
+  PRAGMA journal_mode = WAL;
+  PRAGMA foreign_keys = ON;
+
+  CREATE TABLE IF NOT EXISTS conversations (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    pinned INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS messages (
+    id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    role TEXT NOT NULL CHECK (role IN ('system', 'user', 'assistant')),
+    content TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_conversations_updated_at ON conversations(updated_at);
+  CREATE INDEX IF NOT EXISTS idx_messages_conversation_position ON messages(conversation_id, position);
+`);
+
 function sendJson(res, status, body) {
   const payload = JSON.stringify(body);
   res.writeHead(status, {
@@ -35,6 +66,155 @@ async function readJson(req) {
   for await (const chunk of req) chunks.push(chunk);
   if (chunks.length === 0) return {};
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+}
+
+function createId() {
+  return crypto.randomUUID();
+}
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function normalizeMessage(message, index, conversationId) {
+  return {
+    id: typeof message.id === "string" && message.id ? message.id : createId(),
+    conversationId,
+    role: ["system", "user", "assistant"].includes(message.role) ? message.role : "user",
+    content: typeof message.content === "string" ? message.content : "",
+    position: index,
+    createdAt: typeof message.createdAt === "string" && message.createdAt ? message.createdAt : nowIso()
+  };
+}
+
+function serializeConversation(row, messages) {
+  return {
+    id: row.id,
+    title: row.title,
+    pinned: Boolean(row.pinned),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    messages: messages.map((message) => ({
+      id: message.id,
+      role: message.role,
+      content: message.content,
+      createdAt: message.created_at
+    }))
+  };
+}
+
+function getConversation(id) {
+  const row = db.prepare("SELECT * FROM conversations WHERE id = ?").get(id);
+  if (!row) return null;
+
+  const messages = db
+    .prepare("SELECT * FROM messages WHERE conversation_id = ? ORDER BY position ASC")
+    .all(id);
+  return serializeConversation(row, messages);
+}
+
+function listConversations(search = "") {
+  const trimmedSearch = search.trim();
+  const rows = trimmedSearch
+    ? db
+        .prepare(`
+          SELECT DISTINCT conversations.*
+          FROM conversations
+          LEFT JOIN messages ON messages.conversation_id = conversations.id
+          WHERE conversations.title LIKE ? OR messages.content LIKE ?
+          ORDER BY conversations.pinned DESC, conversations.updated_at DESC
+        `)
+        .all(`%${trimmedSearch}%`, `%${trimmedSearch}%`)
+    : db
+        .prepare("SELECT * FROM conversations ORDER BY pinned DESC, updated_at DESC")
+        .all();
+
+  const messagesByConversation = new Map();
+  if (rows.length > 0) {
+    const ids = rows.map((row) => row.id);
+    const placeholders = ids.map(() => "?").join(",");
+    const messages = db
+      .prepare(`SELECT * FROM messages WHERE conversation_id IN (${placeholders}) ORDER BY position ASC`)
+      .all(...ids);
+    for (const message of messages) {
+      const existing = messagesByConversation.get(message.conversation_id) ?? [];
+      existing.push(message);
+      messagesByConversation.set(message.conversation_id, existing);
+    }
+  }
+
+  return rows.map((row) => serializeConversation(row, messagesByConversation.get(row.id) ?? []));
+}
+
+function upsertConversation(payload) {
+  const id = typeof payload.id === "string" && payload.id ? payload.id : createId();
+  const existing = getConversation(id);
+  const createdAt = payload.createdAt ?? existing?.createdAt ?? nowIso();
+  const updatedAt = nowIso();
+  const title = typeof payload.title === "string" && payload.title.trim()
+    ? payload.title.trim().slice(0, 120)
+    : existing?.title ?? "New local chat";
+  const pinned = Object.hasOwn(payload, "pinned")
+    ? payload.pinned === true || payload.pinned === 1
+      ? 1
+      : 0
+    : existing?.pinned
+      ? 1
+      : 0;
+  const messages = Array.isArray(payload.messages) ? payload.messages : existing?.messages ?? [];
+
+  db.exec("BEGIN");
+  try {
+    db.prepare(`
+      INSERT INTO conversations (id, title, pinned, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        title = excluded.title,
+        pinned = excluded.pinned,
+        updated_at = excluded.updated_at
+    `).run(id, title, pinned, createdAt, updatedAt);
+
+    db.prepare("DELETE FROM messages WHERE conversation_id = ?").run(id);
+    const insertMessage = db.prepare(`
+      INSERT INTO messages (id, conversation_id, role, content, position, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+
+    messages.map((message, index) => normalizeMessage(message, index, id)).forEach((message) => {
+      insertMessage.run(
+        message.id,
+        message.conversationId,
+        message.role,
+        message.content,
+        message.position,
+        message.createdAt
+      );
+    });
+
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+
+  return getConversation(id);
+}
+
+function patchConversation(id, payload) {
+  const existing = getConversation(id);
+  if (!existing) return null;
+
+  return upsertConversation({
+    ...existing,
+    title: payload.title ?? existing.title,
+    pinned: typeof payload.pinned === "boolean" ? payload.pinned : existing.pinned,
+    messages: existing.messages
+  });
+}
+
+function deleteConversation(id) {
+  const result = db.prepare("DELETE FROM conversations WHERE id = ?").run(id);
+  return result.changes > 0;
 }
 
 function resolveBaseUrl(provider, requestedBaseUrl) {
@@ -174,6 +354,66 @@ async function handleHealth(req, res) {
   sendJson(res, 200, health);
 }
 
+async function handleConversations(req, res) {
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  const parts = url.pathname.split("/").filter(Boolean);
+  const id = parts[2];
+
+  try {
+    if (req.method === "GET" && !id) {
+      sendJson(res, 200, { conversations: listConversations(url.searchParams.get("search") ?? "") });
+      return;
+    }
+
+    if (req.method === "POST" && !id) {
+      const body = await readJson(req);
+      sendJson(res, 201, { conversation: upsertConversation(body) });
+      return;
+    }
+
+    if (req.method === "GET" && id) {
+      const conversation = getConversation(id);
+      if (!conversation) {
+        sendJson(res, 404, { error: "Conversation not found" });
+        return;
+      }
+      sendJson(res, 200, { conversation });
+      return;
+    }
+
+    if (req.method === "PUT" && id) {
+      const body = await readJson(req);
+      sendJson(res, 200, { conversation: upsertConversation({ ...body, id }) });
+      return;
+    }
+
+    if (req.method === "PATCH" && id) {
+      const body = await readJson(req);
+      const conversation = patchConversation(id, body);
+      if (!conversation) {
+        sendJson(res, 404, { error: "Conversation not found" });
+        return;
+      }
+      sendJson(res, 200, { conversation });
+      return;
+    }
+
+    if (req.method === "DELETE" && id) {
+      sendJson(res, deleteConversation(id) ? 200 : 404, {
+        deleted: true
+      });
+      return;
+    }
+
+    sendJson(res, 405, { error: "Method not allowed" });
+  } catch (error) {
+    sendJson(res, 500, {
+      error: "Conversation request failed",
+      details: error instanceof Error ? error.message : String(error)
+    });
+  }
+}
+
 async function handleChat(req, res) {
   let body;
   try {
@@ -249,6 +489,11 @@ async function serveStatic(req, res) {
 }
 
 const server = createServer(async (req, res) => {
+  if (req.url?.startsWith("/api/conversations")) {
+    await handleConversations(req, res);
+    return;
+  }
+
   if (req.url?.startsWith("/api/health")) {
     await handleHealth(req, res);
     return;

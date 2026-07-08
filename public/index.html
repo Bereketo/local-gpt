@@ -22,9 +22,15 @@
           New chat
         </button>
 
+        <label class="search-field">
+          Search
+          <input id="conversationSearchInput" type="search" placeholder="Search chats..." autocomplete="off" />
+        </label>
+
         <nav class="conversation-list" id="conversationList"></nav>
 
         <div class="sidebar-footer">
+          <button class="ghost-button" id="pinChatButton" type="button">Pin</button>
           <button class="ghost-button" id="renameChatButton" type="button">Rename</button>
           <button class="ghost-button danger" id="deleteChatButton" type="button">Delete</button>
         </div>

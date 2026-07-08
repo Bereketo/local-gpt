@@ -120,9 +120,17 @@ textarea {
   min-height: 0;
 }
 
+.search-field {
+  gap: 7px;
+}
+
+.search-field input {
+  min-height: 38px;
+}
+
 .sidebar-footer {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
   margin-top: auto;
 }
@@ -172,6 +180,9 @@ textarea {
 }
 
 .conversation-item strong {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -181,6 +192,20 @@ textarea {
 .conversation-item span {
   color: var(--muted);
   font-size: 12px;
+}
+
+.pin-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.empty-list {
+  padding: 12px;
+  color: var(--muted);
+  font-size: 13px;
 }
 
 .chat-panel {

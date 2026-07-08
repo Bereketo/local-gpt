@@ -53,4 +53,10 @@ LLAMA_CPP_BASE_URL=http://127.0.0.1:8080 \
 npm run dev
 ```
 
-Chats and UI preferences are stored in browser local storage.
+Chats are stored locally in SQLite at `data/local-gpt.sqlite`. UI preferences such as the selected provider, endpoints, and generation settings are stored in browser local storage.
+
+The database path can be overridden:
+
+```sh
+DATABASE_PATH=/absolute/path/local-gpt.sqlite npm run dev
+```
