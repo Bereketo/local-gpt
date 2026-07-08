@@ -27,6 +27,8 @@ ollama pull llama3.2
 ollama serve
 ```
 
+When Ollama is selected, Local GPT can also pull a model and delete an installed model from the provider panel.
+
 ### llama.cpp
 
 Default endpoint:
@@ -41,6 +43,8 @@ Start the llama.cpp server with OpenAI-compatible endpoints enabled. The app cal
 /v1/models
 /v1/chat/completions
 ```
+
+llama.cpp model files are managed outside Local GPT for now.
 
 ## Configuration
 
