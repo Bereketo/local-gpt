@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Local GPT</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="Conversations">
+        <div class="brand-row">
+          <div class="brand-mark">LG</div>
+          <div>
+            <h1>Local GPT</h1>
+            <p>Private model workspace</p>
+          </div>
+        </div>
+
+        <button class="new-chat-button" id="newChatButton" type="button">
+          <span aria-hidden="true">+</span>
+          New chat
+        </button>
+
+        <nav class="conversation-list" id="conversationList"></nav>
+      </aside>
+
+      <main class="chat-panel">
+        <header class="topbar">
+          <div class="provider-controls">
+            <label>
+              Provider
+              <select id="providerSelect">
+                <option value="ollama">Ollama</option>
+                <option value="llama.cpp">llama.cpp</option>
+              </select>
+            </label>
+            <label class="endpoint-field">
+              Endpoint
+              <input id="baseUrlInput" type="url" spellcheck="false" />
+            </label>
+            <label>
+              Model
+              <select id="modelSelect"></select>
+            </label>
+            <button class="icon-button" id="refreshModelsButton" type="button" title="Refresh models" aria-label="Refresh models">
+              ↻
+            </button>
+          </div>
+
+          <div class="status-pill" id="connectionStatus">Not connected</div>
+        </header>
+
+        <section class="messages" id="messages" aria-live="polite"></section>
+
+        <form class="composer" id="composer">
+          <div class="composer-options">
+            <label>
+              Temperature
+              <input id="temperatureInput" type="range" min="0" max="2" step="0.1" value="0.7" />
+              <output id="temperatureValue">0.7</output>
+            </label>
+            <label>
+              Context
+              <input id="contextInput" type="number" min="512" step="512" value="4096" />
+            </label>
+          </div>
+          <div class="composer-box">
+            <textarea id="messageInput" rows="1" placeholder="Ask your local model anything..." autocomplete="off"></textarea>
+            <button id="sendButton" type="submit">Send</button>
+          </div>
+        </form>
+      </main>
+    </div>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>
