@@ -18,9 +18,12 @@ const baseUrlInput = document.querySelector("#baseUrlInput");
 const modelSelect = document.querySelector("#modelSelect");
 const refreshModelsButton = document.querySelector("#refreshModelsButton");
 const connectionStatus = document.querySelector("#connectionStatus");
+const setupPanel = document.querySelector("#setupPanel");
 const conversationList = document.querySelector("#conversationList");
 const messagesEl = document.querySelector("#messages");
 const newChatButton = document.querySelector("#newChatButton");
+const renameChatButton = document.querySelector("#renameChatButton");
+const deleteChatButton = document.querySelector("#deleteChatButton");
 const composer = document.querySelector("#composer");
 const messageInput = document.querySelector("#messageInput");
 const sendButton = document.querySelector("#sendButton");
@@ -31,6 +34,7 @@ const contextInput = document.querySelector("#contextInput");
 let state = loadState();
 let isStreaming = false;
 let currentAbortController = null;
+let providerHealth = null;
 
 function loadState() {
   try {
@@ -91,6 +95,32 @@ function createConversation() {
   renderMessages();
 }
 
+function renameActiveConversation() {
+  const conversation = activeConversation();
+  if (!conversation) return;
+
+  const title = prompt("Rename chat", conversation.title)?.trim();
+  if (!title) return;
+
+  conversation.title = title.slice(0, 80);
+  saveState();
+  renderConversations();
+}
+
+function deleteActiveConversation() {
+  const conversation = activeConversation();
+  if (!conversation) return;
+
+  const confirmed = confirm(`Delete "${conversation.title}"?`);
+  if (!confirmed) return;
+
+  state.conversations = state.conversations.filter((item) => item.id !== conversation.id);
+  ensureActiveConversation();
+  saveState();
+  renderConversations();
+  renderMessages();
+}
+
 function setStatus(text, variant = "") {
   connectionStatus.textContent = text;
   connectionStatus.className = `status-pill ${variant}`.trim();
@@ -98,6 +128,81 @@ function setStatus(text, variant = "") {
 
 function providerName(provider = state.provider) {
   return provider === "llama.cpp" ? "llama.cpp" : "Ollama";
+}
+
+function healthTone(health) {
+  if (!health) return "";
+  if (!health.ok) return "error";
+  return health.modelCount > 0 ? "ready" : "warning";
+}
+
+function healthTitle(health) {
+  if (!health) return "Checking provider";
+  if (!health.ok) return `${providerName(health.provider)} is offline`;
+  if (health.modelCount === 0) return `${providerName(health.provider)} is reachable`;
+  return `${providerName(health.provider)} is ready`;
+}
+
+function healthMeta(health) {
+  if (!health) return "Waiting for provider check";
+  const latency = Number.isFinite(health.latencyMs) ? `${health.latencyMs} ms` : "unknown latency";
+  return `${health.baseUrl} · ${latency}`;
+}
+
+function renderSetupPanel() {
+  const health = providerHealth;
+  const tone = healthTone(health);
+  const models = health?.models ?? [];
+  const topModels = models.slice(0, 4);
+  const instructions = health?.instructions;
+  const canChat = health?.ok && health.modelCount > 0;
+
+  setupPanel.className = `setup-panel ${tone}`.trim();
+  setupPanel.innerHTML = `
+    <div class="setup-summary">
+      <div class="health-dot" aria-hidden="true"></div>
+      <div>
+        <h2>${escapeHtml(healthTitle(health))}</h2>
+        <p>${escapeHtml(health?.message ?? "Checking whether your local model server is available.")}</p>
+      </div>
+    </div>
+    <div class="setup-meta">
+      <span>${escapeHtml(healthMeta(health))}</span>
+      <span>${models.length} model${models.length === 1 ? "" : "s"}</span>
+    </div>
+    ${
+      canChat
+        ? `<div class="model-strip">${topModels.map(renderModelChip).join("")}${models.length > topModels.length ? `<span class="model-chip muted">+${models.length - topModels.length} more</span>` : ""}</div>`
+        : renderSetupInstructions(instructions, health)
+    }
+  `;
+}
+
+function renderModelChip(model) {
+  const size = model.size ? formatModelSize(model.size) : "local";
+  return `<span class="model-chip">${escapeHtml(model.name)} <small>${escapeHtml(size)}</small></span>`;
+}
+
+function renderSetupInstructions(instructions, health) {
+  if (!instructions) {
+    return `<div class="setup-actions"><button class="ghost-button" type="button" data-action="refresh-health">Check again</button></div>`;
+  }
+
+  const commandHtml = instructions.commands
+    .map((command) => `<code>${escapeHtml(command)}</code>`)
+    .join("");
+
+  return `
+    <div class="setup-guide">
+      <div>
+        <strong>${escapeHtml(instructions.title)}</strong>
+        <p>${escapeHtml(instructions.note)}</p>
+        ${health?.details ? `<p class="setup-detail">${escapeHtml(health.details)}</p>` : ""}
+      </div>
+      <div class="command-stack">${commandHtml}</div>
+      <button class="ghost-button" type="button" data-action="refresh-health">Check again</button>
+    </div>
+  `;
 }
 
 function renderConversations() {
@@ -156,8 +261,94 @@ function renderMessage(message) {
   bubble.className = "bubble";
   bubble.innerHTML = renderMarkdownish(message.content);
 
-  wrapper.append(avatar, bubble);
+  const actions = document.createElement("div");
+  actions.className = "message-actions";
+  actions.append(
+    buildMessageAction("Copy", () => copyMessage(message)),
+    buildMessageAction("Edit", () => editMessage(message))
+  );
+  if (message.role === "assistant") {
+    actions.append(buildMessageAction("Regenerate", () => regenerateFrom(message)));
+  }
+
+  const content = document.createElement("div");
+  content.className = "message-content";
+  content.append(bubble, actions);
+
+  wrapper.append(avatar, content);
   return wrapper;
+}
+
+function buildMessageAction(label, handler) {
+  const button = document.createElement("button");
+  button.className = "message-action";
+  button.type = "button";
+  button.textContent = label;
+  button.addEventListener("click", handler);
+  return button;
+}
+
+async function copyMessage(message) {
+  try {
+    await navigator.clipboard.writeText(message.content);
+  } catch {
+    const textarea = document.createElement("textarea");
+    textarea.value = message.content;
+    document.body.append(textarea);
+    textarea.select();
+    document.execCommand("copy");
+    textarea.remove();
+  }
+}
+
+function editMessage(message) {
+  if (isStreaming) return;
+  const conversation = activeConversation();
+  if (!conversation) return;
+  if (message.role === "user" && !hasRunnableModel()) return;
+
+  const edited = prompt("Edit message", message.content)?.trim();
+  if (!edited) return;
+
+  const index = conversation.messages.indexOf(message);
+  if (index === -1) return;
+
+  message.content = edited;
+  if (message.role === "user") {
+    conversation.messages = conversation.messages.slice(0, index + 1);
+    regenerateAfterLastUser(conversation);
+    return;
+  }
+
+  saveState();
+  renderMessages();
+}
+
+function regenerateFrom(message) {
+  if (isStreaming) return;
+  const conversation = activeConversation();
+  if (!conversation) return;
+  if (!hasRunnableModel()) return;
+
+  const index = conversation.messages.indexOf(message);
+  if (index <= 0) return;
+
+  conversation.messages = conversation.messages.slice(0, index);
+  regenerateAfterLastUser(conversation);
+}
+
+function regenerateAfterLastUser(conversation) {
+  if (!hasRunnableModel()) return;
+
+  const lastUserMessage = [...conversation.messages].reverse().find((message) => message.role === "user");
+  if (!lastUserMessage) return;
+
+  const assistantMessage = { id: crypto.randomUUID(), role: "assistant", content: "" };
+  conversation.messages.push(assistantMessage);
+  saveState();
+  renderConversations();
+  renderMessages();
+  streamAssistantReply(conversation, assistantMessage);
 }
 
 function escapeHtml(value) {
@@ -171,7 +362,14 @@ function escapeHtml(value) {
 
 function renderMarkdownish(value) {
   const escaped = escapeHtml(value);
-  return escaped.replace(/```([\s\S]*?)```/g, (_match, code) => `<pre><code>${code.trim()}</code></pre>`);
+  const withCode = escaped.replace(/```([\s\S]*?)```/g, (_match, code) => `<pre><code>${code.trim()}</code></pre>`);
+  return withCode
+    .replace(/^### (.*)$/gm, "<h3>$1</h3>")
+    .replace(/^## (.*)$/gm, "<h2>$1</h2>")
+    .replace(/^# (.*)$/gm, "<h1>$1</h1>")
+    .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/^\s*[-*] (.*)$/gm, "<div class=\"list-line\">• $1</div>");
 }
 
 function syncControls() {
@@ -187,16 +385,20 @@ async function refreshModels() {
   const baseUrl = state.endpoints[provider];
   modelSelect.innerHTML = `<option value="">Loading models...</option>`;
   setStatus("Connecting...");
+  providerHealth = null;
+  renderSetupPanel();
 
   try {
-    const response = await fetch(`/api/models?provider=${encodeURIComponent(provider)}&baseUrl=${encodeURIComponent(baseUrl)}`);
+    const response = await fetch(`/api/health?provider=${encodeURIComponent(provider)}&baseUrl=${encodeURIComponent(baseUrl)}`);
     const data = await response.json();
-    if (!response.ok) throw new Error(data.details || data.error || "Unable to load models");
+    providerHealth = data;
+    renderSetupPanel();
+    if (!data.ok) throw new Error(data.details || data.message || "Unable to load models");
 
     modelSelect.innerHTML = "";
     if (data.models.length === 0) {
       modelSelect.innerHTML = `<option value="">No models found</option>`;
-      setStatus("No models found", "error");
+      setStatus("No models installed", "error");
       return;
     }
 
@@ -217,6 +419,19 @@ async function refreshModels() {
     setStatus(`${data.models.length} model${data.models.length === 1 ? "" : "s"} ready`, "connected");
   } catch (error) {
     modelSelect.innerHTML = `<option value="">Unavailable</option>`;
+    if (!providerHealth) {
+      providerHealth = {
+        provider,
+        baseUrl,
+        ok: false,
+        modelCount: 0,
+        models: [],
+        latencyMs: 0,
+        message: "Provider is unreachable",
+        details: error instanceof Error ? error.message : String(error)
+      };
+      renderSetupPanel();
+    }
     setStatus(`${providerName(provider)} is offline`, "error");
   }
 }
@@ -244,10 +459,14 @@ async function streamChat() {
   const prompt = messageInput.value.trim();
   const conversation = activeConversation();
   const model = modelSelect.value;
-  if (!prompt || !conversation || !model || isStreaming) return;
+  if (!prompt || !conversation || isStreaming) return;
+  if (!model) {
+    setStatus(`Select an available ${providerName()} model`, "error");
+    return;
+  }
 
-  const userMessage = { role: "user", content: prompt };
-  const assistantMessage = { role: "assistant", content: "" };
+  const userMessage = { id: crypto.randomUUID(), role: "user", content: prompt };
+  const assistantMessage = { id: crypto.randomUUID(), role: "assistant", content: "" };
   conversation.messages.push(userMessage, assistantMessage);
   if (conversation.title === "New local chat") {
     conversation.title = prompt.slice(0, 56);
@@ -258,10 +477,15 @@ async function streamChat() {
   renderConversations();
   renderMessages();
 
+  await streamAssistantReply(conversation, assistantMessage);
+}
+
+async function streamAssistantReply(conversation, assistantMessage) {
+  const model = modelSelect.value;
+  if (!conversation || !assistantMessage || !model || isStreaming) return;
+
   isStreaming = true;
   currentAbortController = new AbortController();
-  sendButton.disabled = true;
-  sendButton.disabled = false;
   sendButton.textContent = "Stop";
 
   try {
@@ -329,6 +553,12 @@ function appendStreamLine(line, assistantMessage) {
   renderMessages();
 }
 
+function hasRunnableModel() {
+  if (modelSelect.value) return true;
+  setStatus(`Select an available ${providerName()} model`, "error");
+  return false;
+}
+
 function autosizeTextarea() {
   messageInput.style.height = "auto";
   messageInput.style.height = `${Math.min(messageInput.scrollHeight, 180)}px`;
@@ -354,6 +584,12 @@ modelSelect.addEventListener("change", () => {
 
 refreshModelsButton.addEventListener("click", refreshModels);
 newChatButton.addEventListener("click", createConversation);
+renameChatButton.addEventListener("click", renameActiveConversation);
+deleteChatButton.addEventListener("click", deleteActiveConversation);
+setupPanel.addEventListener("click", (event) => {
+  const action = event.target instanceof HTMLElement ? event.target.dataset.action : "";
+  if (action === "refresh-health") refreshModels();
+});
 
 temperatureInput.addEventListener("input", () => {
   state.temperature = Number(temperatureInput.value);
@@ -384,4 +620,5 @@ ensureActiveConversation();
 saveState();
 renderConversations();
 renderMessages();
+renderSetupPanel();
 refreshModels();

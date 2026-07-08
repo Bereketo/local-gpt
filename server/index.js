@@ -1,5 +1,4 @@
 import { createServer } from "node:http";
-import { readFile } from "node:fs/promises";
 import { createReadStream, existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -46,6 +45,87 @@ function resolveBaseUrl(provider, requestedBaseUrl) {
   return provider === "llama.cpp" ? llamaBaseUrl : ollamaBaseUrl;
 }
 
+function providerInstructions(provider) {
+  if (provider === "llama.cpp") {
+    return {
+      title: "Start llama.cpp server",
+      commands: [
+        "./llama-server -m /path/to/model.gguf --host 127.0.0.1 --port 8080"
+      ],
+      note: "Local GPT expects the llama.cpp OpenAI-compatible endpoints at /v1/models and /v1/chat/completions."
+    };
+  }
+
+  return {
+    title: "Start Ollama",
+    commands: ["ollama serve", "ollama pull llama3.2"],
+    note: "Ollama must be running locally and have at least one model installed."
+  };
+}
+
+async function loadProviderModels(provider, baseUrl) {
+  if (provider === "llama.cpp") {
+    const response = await fetch(`${baseUrl}/v1/models`);
+    const data = await response.json();
+    const models = Array.isArray(data.data)
+      ? data.data.map((model) => ({ name: model.id, details: model }))
+      : [];
+
+    return { response, models };
+  }
+
+  const response = await fetch(`${baseUrl}/api/tags`);
+  const data = await response.json();
+  const models = Array.isArray(data.models)
+    ? data.models.map((model) => ({
+        name: model.name,
+        size: model.size,
+        modifiedAt: model.modified_at,
+        details: model.details
+      }))
+    : [];
+
+  return { response, models };
+}
+
+async function checkProviderHealth(provider, baseUrl) {
+  const startedAt = performance.now();
+
+  try {
+    const { response, models } = await loadProviderModels(provider, baseUrl);
+    const latencyMs = Math.round(performance.now() - startedAt);
+
+    return {
+      provider,
+      baseUrl,
+      ok: response.ok,
+      status: response.status,
+      latencyMs,
+      modelCount: models.length,
+      models,
+      message: response.ok
+        ? models.length > 0
+          ? `${models.length} model${models.length === 1 ? "" : "s"} available`
+          : "Provider is reachable, but no models are installed"
+        : `Provider returned HTTP ${response.status}`,
+      instructions: providerInstructions(provider)
+    };
+  } catch (error) {
+    return {
+      provider,
+      baseUrl,
+      ok: false,
+      status: 0,
+      latencyMs: Math.round(performance.now() - startedAt),
+      modelCount: 0,
+      models: [],
+      message: "Provider is unreachable",
+      details: error instanceof Error ? error.message : String(error),
+      instructions: providerInstructions(provider)
+    };
+  }
+}
+
 async function forwardStream(res, upstream) {
   res.writeHead(upstream.status, {
     "content-type": upstream.headers.get("content-type") ?? "application/octet-stream",
@@ -75,40 +155,23 @@ async function handleModels(req, res) {
   const provider = query.get("provider") ?? "ollama";
   const baseUrl = resolveBaseUrl(provider, query.get("baseUrl"));
 
-  try {
-    if (provider === "llama.cpp") {
-      const response = await fetch(`${baseUrl}/v1/models`);
-      const data = await response.json();
-      sendJson(res, response.ok ? 200 : response.status, {
-        provider,
-        baseUrl,
-        models: Array.isArray(data.data)
-          ? data.data.map((model) => ({ name: model.id, details: model }))
-          : []
-      });
-      return;
-    }
+  const health = await checkProviderHealth(provider, baseUrl);
+  sendJson(res, health.ok ? 200 : 502, {
+    provider,
+    baseUrl,
+    models: health.models,
+    error: health.ok ? undefined : health.message,
+    details: health.details
+  });
+}
 
-    const response = await fetch(`${baseUrl}/api/tags`);
-    const data = await response.json();
-    sendJson(res, response.ok ? 200 : response.status, {
-      provider,
-      baseUrl,
-      models: Array.isArray(data.models)
-        ? data.models.map((model) => ({
-            name: model.name,
-            size: model.size,
-            modifiedAt: model.modified_at,
-            details: model.details
-          }))
-        : []
-    });
-  } catch (error) {
-    sendJson(res, 502, {
-      error: "Provider is unreachable",
-      details: error instanceof Error ? error.message : String(error)
-    });
-  }
+async function handleHealth(req, res) {
+  const query = new URL(req.url, `http://${req.headers.host}`).searchParams;
+  const provider = query.get("provider") ?? "ollama";
+  const baseUrl = resolveBaseUrl(provider, query.get("baseUrl"));
+  const health = await checkProviderHealth(provider, baseUrl);
+
+  sendJson(res, 200, health);
 }
 
 async function handleChat(req, res) {
@@ -186,6 +249,11 @@ async function serveStatic(req, res) {
 }
 
 const server = createServer(async (req, res) => {
+  if (req.url?.startsWith("/api/health")) {
+    await handleHealth(req, res);
+    return;
+  }
+
   if (req.url?.startsWith("/api/models")) {
     await handleModels(req, res);
     return;

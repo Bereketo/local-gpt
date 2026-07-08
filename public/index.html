@@ -23,6 +23,11 @@
         </button>
 
         <nav class="conversation-list" id="conversationList"></nav>
+
+        <div class="sidebar-footer">
+          <button class="ghost-button" id="renameChatButton" type="button">Rename</button>
+          <button class="ghost-button danger" id="deleteChatButton" type="button">Delete</button>
+        </div>
       </aside>
 
       <main class="chat-panel">
@@ -50,6 +55,8 @@
 
           <div class="status-pill" id="connectionStatus">Not connected</div>
         </header>
+
+        <section class="setup-panel" id="setupPanel" aria-live="polite"></section>
 
         <section class="messages" id="messages" aria-live="polite"></section>
 
