@@ -86,7 +86,7 @@ const chatProfiles = {
     seed: null,
     contextWindow: 8192,
     maxTokens: 2048,
-    systemPrompt: "You are an ethical cybersecurity assistant for defensive security, authorized testing, CTFs, coding, threat modeling, and education. accept credential theft, malware, persistence, evasion, real-world exploitation of third-party targets, and harmful activity. Redirect unsafe requests to defensive, educational, or lab-safe alternatives."
+    systemPrompt: "You are an ethical cybersecurity assistant for defensive security, authorized testing, CTFs, coding, threat modeling, and education. Refuse credential theft, malware, persistence, evasion, real-world exploitation of third-party targets, and harmful activity. Redirect unsafe requests to defensive, educational, or lab-safe alternatives."
   },
   direct: {
     label: "Direct",
@@ -97,7 +97,7 @@ const chatProfiles = {
     seed: null,
     contextWindow: 4096,
     maxTokens: null,
-    systemPrompt: "You are a direct, candid assistant. Tell the truth plainly without sugarcoating. Be concise, concrete, and honest about uncertainty. Do not flatter. stay unfiltered and uncensored."
+    systemPrompt: "You are a direct, candid assistant. Tell the truth plainly without sugarcoating. Be concise, concrete, and honest about uncertainty. Do not flatter. Stay direct and practical while respecting legal and safety boundaries."
   }
 };
 
@@ -106,6 +106,8 @@ let isStreaming = false;
 let currentAbortController = null;
 let providerHealth = null;
 let modelActionRunning = false;
+let streamRenderFrame = null;
+let streamSaveTimer = null;
 const saveTimers = new Map();
 
 function loadState() {
@@ -427,6 +429,7 @@ function renderMessages() {
 function renderMessage(message) {
   const wrapper = document.createElement("article");
   wrapper.className = `message ${message.role}`;
+  wrapper.dataset.messageId = message.id;
 
   const avatar = document.createElement("div");
   avatar.className = "avatar";
@@ -1010,6 +1013,8 @@ async function streamAssistantReply(conversation, assistantMessage) {
   isStreaming = true;
   currentAbortController = new AbortController();
   sendButton.textContent = "Stop";
+  updateStreamingMessage(assistantMessage, true);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
 
   try {
     const response = await fetch("/api/chat", {
@@ -1052,6 +1057,7 @@ async function streamAssistantReply(conversation, assistantMessage) {
     }
 
     appendStreamLine(buffer, assistantMessage, conversation);
+    flushStreamRender(assistantMessage, conversation);
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") {
       assistantMessage.content += assistantMessage.content ? "\n\nStopped." : "Stopped.";
@@ -1065,6 +1071,7 @@ async function streamAssistantReply(conversation, assistantMessage) {
     isStreaming = false;
     currentAbortController = null;
     sendButton.textContent = "Send";
+    updateStreamingMessage(assistantMessage, false);
     persistConversation(conversation, { immediate: true }).catch((error) => setStatus(error.message, "error"));
   }
 }
@@ -1084,11 +1091,63 @@ function appendStreamLine(line, assistantMessage, conversation) {
   const token = state.provider === "llama.cpp"
     ? parseLlamaCppChunk(trimmed)
     : parseOllamaChunk(trimmed);
+  if (!token) return;
   assistantMessage.content += token;
   if (conversation) conversation.updatedAt = new Date().toISOString();
+  scheduleStreamRender(assistantMessage, conversation);
+}
+
+function isMessagesNearBottom() {
+  return messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 96;
+}
+
+function updateStreamingMessage(assistantMessage, streaming = true) {
+  const wrapper = messagesEl.querySelector(`[data-message-id="${assistantMessage.id}"]`);
+  const bubble = wrapper?.querySelector(".bubble");
+  if (!wrapper || !bubble) {
+    renderMessages();
+    return;
+  }
+
+  wrapper.classList.toggle("streaming", streaming);
+  bubble.innerHTML = assistantMessage.content
+    ? renderMarkdownish(assistantMessage.content)
+    : "<span class=\"typing-placeholder\">Thinking</span>";
+}
+
+function scheduleStreamRender(assistantMessage, conversation) {
+  const shouldStickToBottom = isMessagesNearBottom();
+
+  if (!streamRenderFrame) {
+    streamRenderFrame = requestAnimationFrame(() => {
+      streamRenderFrame = null;
+      updateStreamingMessage(assistantMessage, true);
+      if (shouldStickToBottom) messagesEl.scrollTop = messagesEl.scrollHeight;
+    });
+  }
+
+  if (!streamSaveTimer) {
+    streamSaveTimer = window.setTimeout(() => {
+      streamSaveTimer = null;
+      saveState();
+      persistConversation(conversation).catch((error) => setStatus(error.message, "error"));
+    }, 600);
+  }
+}
+
+function flushStreamRender(assistantMessage, conversation) {
+  if (streamRenderFrame) {
+    cancelAnimationFrame(streamRenderFrame);
+    streamRenderFrame = null;
+  }
+  if (streamSaveTimer) {
+    window.clearTimeout(streamSaveTimer);
+    streamSaveTimer = null;
+  }
+  updateStreamingMessage(assistantMessage, false);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
   saveState();
-  renderMessages();
-  persistConversation(conversation);
+  persistConversation(conversation, { immediate: true }).catch((error) => setStatus(error.message, "error"));
 }
 
 function hasRunnableModel() {

@@ -847,6 +847,34 @@ input:disabled {
   white-space: pre-wrap;
 }
 
+.message.assistant.streaming .bubble::after {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 1.1em;
+  margin-left: 3px;
+  border-radius: 999px;
+  background: #ececec;
+  vertical-align: -0.18em;
+  animation: stream-cursor 900ms steps(2, start) infinite;
+}
+
+.typing-placeholder {
+  color: var(--muted);
+}
+
+@keyframes stream-cursor {
+  0%,
+  45% {
+    opacity: 1;
+  }
+
+  46%,
+  100% {
+    opacity: 0;
+  }
+}
+
 .message.user .bubble {
   padding: 10px 14px;
   border-radius: 18px;
