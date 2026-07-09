@@ -96,6 +96,35 @@
           </div>
         </div>
 
+        <div class="settings-section llama-launcher" id="llamaLauncher">
+          <div class="settings-head">
+            <div>
+              <h3>llama.cpp Server</h3>
+              <p id="llamaServerStatus">Start a local GGUF model with llama-server.</p>
+            </div>
+            <button class="ghost-button" id="stopLlamaButton" type="button">Stop</button>
+          </div>
+          <div class="llama-launch-grid">
+            <label class="llama-path-field">
+              GGUF model path
+              <input id="llamaModelPathInput" type="text" spellcheck="false" placeholder="/path/to/model.gguf" />
+            </label>
+            <label>
+              Port
+              <input id="llamaPortInput" type="number" min="1" max="65535" value="8080" />
+            </label>
+            <label>
+              Context
+              <input id="llamaContextInput" type="number" min="512" step="512" placeholder="Auto" />
+            </label>
+            <label>
+              GPU layers
+              <input id="llamaGpuLayersInput" type="number" min="0" step="1" placeholder="Auto" />
+            </label>
+            <button class="ghost-button primary" id="startLlamaButton" type="button">Start server</button>
+          </div>
+        </div>
+
         <div class="settings-section">
           <div class="settings-head">
             <div>
@@ -138,6 +167,18 @@
           <label>
             Max tokens
             <input id="maxTokensInput" type="number" min="128" step="128" placeholder="Auto" />
+          </label>
+          <label>
+            Top-p
+            <input id="topPInput" type="number" min="0" max="1" step="0.05" value="0.9" />
+          </label>
+          <label>
+            Repeat penalty
+            <input id="repeatPenaltyInput" type="number" min="0.8" max="2" step="0.05" value="1.1" />
+          </label>
+          <label>
+            Seed
+            <input id="seedInput" type="number" step="1" placeholder="Random" />
           </label>
         </div>
       </section>

@@ -1,6 +1,7 @@
 import { createServer } from "node:http";
 import { createReadStream, existsSync, mkdirSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
+import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -14,6 +15,11 @@ const host = process.env.HOST ?? "127.0.0.1";
 const port = Number(process.env.PORT ?? 5173);
 const ollamaBaseUrl = process.env.OLLAMA_BASE_URL ?? "http://127.0.0.1:11434";
 const llamaBaseUrl = process.env.LLAMA_CPP_BASE_URL ?? "http://127.0.0.1:8080";
+const llamaServerBinary = process.env.LLAMA_CPP_SERVER_BIN ?? "/opt/homebrew/bin/llama-server";
+
+let managedLlamaProcess = null;
+let managedLlamaConfig = null;
+let managedLlamaLog = "";
 
 const mimeTypes = new Map([
   [".html", "text/html; charset=utf-8"],
@@ -40,6 +46,9 @@ db.exec(`
     temperature REAL,
     context_window INTEGER,
     max_tokens INTEGER,
+    top_p REAL,
+    repeat_penalty REAL,
+    seed INTEGER,
     model TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -65,6 +74,9 @@ const migrations = [
   ["temperature", "ALTER TABLE conversations ADD COLUMN temperature REAL"],
   ["context_window", "ALTER TABLE conversations ADD COLUMN context_window INTEGER"],
   ["max_tokens", "ALTER TABLE conversations ADD COLUMN max_tokens INTEGER"],
+  ["top_p", "ALTER TABLE conversations ADD COLUMN top_p REAL"],
+  ["repeat_penalty", "ALTER TABLE conversations ADD COLUMN repeat_penalty REAL"],
+  ["seed", "ALTER TABLE conversations ADD COLUMN seed INTEGER"],
   ["model", "ALTER TABLE conversations ADD COLUMN model TEXT"]
 ];
 
@@ -102,6 +114,26 @@ function optionalNumber(value, fallback = null) {
   return Number.isFinite(number) ? number : fallback;
 }
 
+function friendlyModelName(name) {
+  if (!name || typeof name !== "string") return "Unknown model";
+  const baseName = path.basename(name).replace(/\.gguf$/i, "");
+  return baseName
+    .replaceAll("--", "/")
+    .replaceAll("_", " ")
+    .replaceAll("-", " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function llamaProcessStatus() {
+  return {
+    running: Boolean(managedLlamaProcess && managedLlamaProcess.exitCode === null),
+    managed: Boolean(managedLlamaProcess),
+    config: managedLlamaConfig,
+    log: managedLlamaLog.slice(-4000)
+  };
+}
+
 function normalizeMessage(message, index, conversationId) {
   return {
     id: typeof message.id === "string" && message.id ? message.id : createId(),
@@ -123,6 +155,9 @@ function serializeConversation(row, messages) {
     temperature: row.temperature,
     contextWindow: row.context_window,
     maxTokens: row.max_tokens,
+    topP: row.top_p,
+    repeatPenalty: row.repeat_penalty,
+    seed: row.seed,
     model: row.model,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -201,6 +236,15 @@ function upsertConversation(payload) {
   const maxTokens = Object.hasOwn(payload, "maxTokens")
     ? optionalNumber(payload.maxTokens)
     : existing?.maxTokens ?? null;
+  const topP = Object.hasOwn(payload, "topP")
+    ? optionalNumber(payload.topP)
+    : existing?.topP ?? null;
+  const repeatPenalty = Object.hasOwn(payload, "repeatPenalty")
+    ? optionalNumber(payload.repeatPenalty)
+    : existing?.repeatPenalty ?? null;
+  const seed = Object.hasOwn(payload, "seed")
+    ? optionalNumber(payload.seed)
+    : existing?.seed ?? null;
   const model = typeof payload.model === "string" && payload.model.trim()
     ? payload.model.trim()
     : existing?.model ?? null;
@@ -218,9 +262,9 @@ function upsertConversation(payload) {
     db.prepare(`
       INSERT INTO conversations (
         id, title, pinned, profile, system_prompt, temperature, context_window,
-        max_tokens, model, created_at, updated_at
+        max_tokens, top_p, repeat_penalty, seed, model, created_at, updated_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         title = excluded.title,
         pinned = excluded.pinned,
@@ -229,6 +273,9 @@ function upsertConversation(payload) {
         temperature = excluded.temperature,
         context_window = excluded.context_window,
         max_tokens = excluded.max_tokens,
+        top_p = excluded.top_p,
+        repeat_penalty = excluded.repeat_penalty,
+        seed = excluded.seed,
         model = excluded.model,
         updated_at = excluded.updated_at
     `).run(
@@ -240,6 +287,9 @@ function upsertConversation(payload) {
       temperature,
       contextWindow,
       maxTokens,
+      topP,
+      repeatPenalty,
+      seed,
       model,
       createdAt,
       updatedAt
@@ -284,6 +334,9 @@ function patchConversation(id, payload) {
     temperature: Object.hasOwn(payload, "temperature") ? payload.temperature : existing.temperature,
     contextWindow: Object.hasOwn(payload, "contextWindow") ? payload.contextWindow : existing.contextWindow,
     maxTokens: Object.hasOwn(payload, "maxTokens") ? payload.maxTokens : existing.maxTokens,
+    topP: Object.hasOwn(payload, "topP") ? payload.topP : existing.topP,
+    repeatPenalty: Object.hasOwn(payload, "repeatPenalty") ? payload.repeatPenalty : existing.repeatPenalty,
+    seed: Object.hasOwn(payload, "seed") ? payload.seed : existing.seed,
     model: Object.hasOwn(payload, "model") ? payload.model : existing.model,
     messages: existing.messages
   });
@@ -325,7 +378,12 @@ async function loadProviderModels(provider, baseUrl) {
     const response = await fetch(`${baseUrl}/v1/models`);
     const data = await response.json();
     const models = Array.isArray(data.data)
-      ? data.data.map((model) => ({ name: model.id, details: model }))
+      ? data.data.map((model) => ({
+          name: model.id,
+          label: friendlyModelName(model.id),
+          size: model.meta?.size,
+          details: model
+        }))
       : [];
 
     return { response, models };
@@ -336,6 +394,7 @@ async function loadProviderModels(provider, baseUrl) {
   const models = Array.isArray(data.models)
     ? data.models.map((model) => ({
         name: model.name,
+        label: model.name,
         size: model.size,
         modifiedAt: model.modified_at,
         details: model.details
@@ -507,6 +566,166 @@ async function handleDeleteModel(req, res) {
   }
 }
 
+async function waitForLlamaServer(baseUrl, timeoutMs = 20000) {
+  const startedAt = Date.now();
+  let lastError = "";
+
+  while (Date.now() - startedAt < timeoutMs) {
+    try {
+      const response = await fetch(`${baseUrl}/health`);
+      if (response.ok) return true;
+      lastError = `HTTP ${response.status}`;
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+
+  throw new Error(lastError || "Timed out waiting for llama.cpp server");
+}
+
+async function handleLlamaStatus(_req, res) {
+  const baseUrl = managedLlamaConfig?.baseUrl ?? llamaBaseUrl;
+  const status = llamaProcessStatus();
+  let reachable = false;
+  let health = null;
+
+  try {
+    const response = await fetch(`${baseUrl}/health`);
+    reachable = response.ok;
+    health = await response.json().catch(() => ({}));
+  } catch {
+    reachable = false;
+  }
+
+  sendJson(res, 200, { ...status, reachable, baseUrl, health });
+}
+
+async function handleStartLlama(req, res) {
+  let body;
+  try {
+    body = await readJson(req);
+  } catch {
+    sendJson(res, 400, { error: "Request body must be valid JSON." });
+    return;
+  }
+
+  const modelPath = typeof body.modelPath === "string" ? body.modelPath.trim() : "";
+  const hostValue = typeof body.host === "string" && body.host.trim() ? body.host.trim() : "127.0.0.1";
+  const portValue = optionalNumber(body.port, 8080);
+  const contextWindow = optionalNumber(body.contextWindow);
+  const gpuLayers = optionalNumber(body.gpuLayers);
+
+  if (!modelPath) {
+    sendJson(res, 400, { error: "A GGUF model path is required." });
+    return;
+  }
+
+  if (!existsSync(modelPath)) {
+    sendJson(res, 400, { error: "Model file does not exist.", details: modelPath });
+    return;
+  }
+
+  if (!existsSync(llamaServerBinary)) {
+    sendJson(res, 400, {
+      error: "llama-server binary was not found.",
+      details: llamaServerBinary
+    });
+    return;
+  }
+
+  const baseUrl = `http://${hostValue}:${portValue}`;
+  try {
+    const response = await fetch(`${baseUrl}/health`);
+    if (response.ok && (!managedLlamaProcess || managedLlamaProcess.exitCode !== null)) {
+      managedLlamaConfig = {
+        modelPath,
+        modelLabel: friendlyModelName(modelPath),
+        host: hostValue,
+        port: portValue,
+        baseUrl,
+        contextWindow,
+        gpuLayers,
+        binary: llamaServerBinary,
+        external: true
+      };
+      sendJson(res, 200, {
+        ok: true,
+        message: "A llama.cpp server is already reachable on this port.",
+        status: llamaProcessStatus()
+      });
+      return;
+    }
+  } catch {
+    // No server is reachable yet; continue and start one.
+  }
+
+  if (managedLlamaProcess && managedLlamaProcess.exitCode === null) {
+    managedLlamaProcess.kill("SIGTERM");
+    managedLlamaProcess = null;
+  }
+
+  const args = ["-m", modelPath, "--host", hostValue, "--port", String(portValue)];
+  if (contextWindow && contextWindow > 0) args.push("-c", String(contextWindow));
+  if (gpuLayers !== null && gpuLayers >= 0) args.push("-ngl", String(gpuLayers));
+
+  managedLlamaLog = "";
+  managedLlamaConfig = {
+    modelPath,
+    modelLabel: friendlyModelName(modelPath),
+    host: hostValue,
+    port: portValue,
+    baseUrl,
+    contextWindow,
+    gpuLayers,
+    binary: llamaServerBinary
+  };
+
+  try {
+    managedLlamaProcess = spawn(llamaServerBinary, args, {
+      cwd: rootDir,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+
+    managedLlamaProcess.stdout.on("data", (chunk) => {
+      managedLlamaLog = `${managedLlamaLog}${chunk.toString("utf8")}`.slice(-12000);
+    });
+    managedLlamaProcess.stderr.on("data", (chunk) => {
+      managedLlamaLog = `${managedLlamaLog}${chunk.toString("utf8")}`.slice(-12000);
+    });
+    managedLlamaProcess.on("exit", (code, signal) => {
+      managedLlamaLog = `${managedLlamaLog}\nllama-server exited with ${signal ?? code}`.slice(-12000);
+    });
+
+    await waitForLlamaServer(managedLlamaConfig.baseUrl);
+    sendJson(res, 200, {
+      ok: true,
+      message: `Started ${managedLlamaConfig.modelLabel}`,
+      status: llamaProcessStatus()
+    });
+  } catch (error) {
+    if (managedLlamaProcess && managedLlamaProcess.exitCode === null) {
+      managedLlamaProcess.kill("SIGTERM");
+    }
+    sendJson(res, 502, {
+      error: "Failed to start llama.cpp server",
+      details: error instanceof Error ? error.message : String(error),
+      log: managedLlamaLog.slice(-4000)
+    });
+  }
+}
+
+async function handleStopLlama(_req, res) {
+  if (!managedLlamaProcess || managedLlamaProcess.exitCode !== null) {
+    sendJson(res, 200, { ok: true, message: "No managed llama.cpp server is running." });
+    return;
+  }
+
+  managedLlamaProcess.kill("SIGTERM");
+  managedLlamaProcess = null;
+  sendJson(res, 200, { ok: true, message: "Stopped managed llama.cpp server." });
+}
+
 async function handleHealth(req, res) {
   const query = new URL(req.url, `http://${req.headers.host}`).searchParams;
   const provider = query.get("provider") ?? "ollama";
@@ -604,6 +823,9 @@ async function handleChat(req, res) {
           messages,
           stream: true,
           temperature: body.temperature,
+          top_p: body.topP,
+          repeat_penalty: body.repeatPenalty,
+          seed: body.seed,
           max_tokens: body.maxTokens
         })
       });
@@ -620,6 +842,9 @@ async function handleChat(req, res) {
         stream: true,
         options: {
           temperature: body.temperature,
+          top_p: body.topP,
+          repeat_penalty: body.repeatPenalty,
+          seed: body.seed,
           num_ctx: body.contextWindow,
           num_predict: body.maxTokens
         }
@@ -674,6 +899,21 @@ const server = createServer(async (req, res) => {
 
   if (req.url?.startsWith("/api/models")) {
     await handleModels(req, res);
+    return;
+  }
+
+  if (req.url === "/api/llama/status" && req.method === "GET") {
+    await handleLlamaStatus(req, res);
+    return;
+  }
+
+  if (req.url === "/api/llama/start" && req.method === "POST") {
+    await handleStartLlama(req, res);
+    return;
+  }
+
+  if (req.url === "/api/llama/stop" && req.method === "POST") {
+    await handleStopLlama(req, res);
     return;
   }
 

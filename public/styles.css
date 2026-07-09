@@ -251,6 +251,16 @@ button {
   background: #1b1b1b;
 }
 
+.ghost-button.primary {
+  border-color: rgba(25, 195, 125, 0.36);
+  background: var(--accent-soft);
+  color: #8ff1c3;
+}
+
+.ghost-button.primary:hover {
+  background: rgba(25, 195, 125, 0.2);
+}
+
 .ghost-button.danger {
   color: var(--danger);
 }
@@ -582,6 +592,21 @@ textarea:focus {
   grid-template-columns: 140px minmax(220px, 1fr) 190px 38px;
   align-items: end;
   gap: 10px;
+}
+
+.llama-launch-grid {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) 92px 120px 110px auto;
+  align-items: end;
+  gap: 10px;
+}
+
+.llama-path-field {
+  min-width: 0;
+}
+
+#llamaServerStatus.error {
+  color: #ff9b9b;
 }
 
 .settings-backdrop {
@@ -1035,6 +1060,15 @@ input:disabled {
     grid-template-columns: 1fr 1fr 1fr auto;
   }
 
+  .llama-launch-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .llama-path-field,
+  .llama-launch-grid .primary {
+    grid-column: 1 / -1;
+  }
+
   .endpoint-field {
     grid-column: 1 / -1;
   }
@@ -1055,8 +1089,14 @@ input:disabled {
 
 @media (max-width: 620px) {
   .provider-controls,
-  .profile-pills {
+  .profile-pills,
+  .llama-launch-grid {
     grid-template-columns: 1fr;
+  }
+
+  .llama-path-field,
+  .llama-launch-grid .primary {
+    grid-column: auto;
   }
 
   .setup-panel,
