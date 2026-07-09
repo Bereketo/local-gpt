@@ -59,6 +59,8 @@ npm run dev
 
 Chats are stored locally in SQLite at `data/local-gpt.sqlite`. UI preferences such as the selected provider, endpoints, and generation settings are stored in browser local storage.
 
+Each chat can use its own profile and settings. Built-in profiles are General, Coding, Hacking for ethical security work, and Direct for blunt no-sugarcoating answers within normal safety and legal boundaries.
+
 The database path can be overridden:
 
 ```sh

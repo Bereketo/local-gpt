@@ -69,6 +69,15 @@
         <form class="composer" id="composer">
           <div class="composer-options">
             <label>
+              Profile
+              <select id="profileSelect">
+                <option value="general">General</option>
+                <option value="coding">Coding</option>
+                <option value="hacking">Hacking</option>
+                <option value="direct">Direct</option>
+              </select>
+            </label>
+            <label>
               Temperature
               <input id="temperatureInput" type="range" min="0" max="2" step="0.1" value="0.7" />
               <output id="temperatureValue">0.7</output>
@@ -77,6 +86,13 @@
               Context
               <input id="contextInput" type="number" min="512" step="512" value="4096" />
             </label>
+            <label>
+              Max tokens
+              <input id="maxTokensInput" type="number" min="128" step="128" placeholder="Auto" />
+            </label>
+          </div>
+          <div class="profile-editor">
+            <textarea id="systemPromptInput" rows="2" placeholder="System prompt for this chat..."></textarea>
           </div>
           <div class="composer-box">
             <textarea id="messageInput" rows="1" placeholder="Ask your local model anything..." autocomplete="off"></textarea>

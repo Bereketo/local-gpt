@@ -35,6 +35,12 @@ db.exec(`
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
     pinned INTEGER NOT NULL DEFAULT 0,
+    profile TEXT NOT NULL DEFAULT 'general',
+    system_prompt TEXT NOT NULL DEFAULT '',
+    temperature REAL,
+    context_window INTEGER,
+    max_tokens INTEGER,
+    model TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   );
@@ -51,6 +57,20 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_conversations_updated_at ON conversations(updated_at);
   CREATE INDEX IF NOT EXISTS idx_messages_conversation_position ON messages(conversation_id, position);
 `);
+
+const conversationColumns = db.prepare("PRAGMA table_info(conversations)").all().map((column) => column.name);
+const migrations = [
+  ["profile", "ALTER TABLE conversations ADD COLUMN profile TEXT NOT NULL DEFAULT 'general'"],
+  ["system_prompt", "ALTER TABLE conversations ADD COLUMN system_prompt TEXT NOT NULL DEFAULT ''"],
+  ["temperature", "ALTER TABLE conversations ADD COLUMN temperature REAL"],
+  ["context_window", "ALTER TABLE conversations ADD COLUMN context_window INTEGER"],
+  ["max_tokens", "ALTER TABLE conversations ADD COLUMN max_tokens INTEGER"],
+  ["model", "ALTER TABLE conversations ADD COLUMN model TEXT"]
+];
+
+for (const [column, statement] of migrations) {
+  if (!conversationColumns.includes(column)) db.exec(statement);
+}
 
 function sendJson(res, status, body) {
   const payload = JSON.stringify(body);
@@ -76,6 +96,12 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function optionalNumber(value, fallback = null) {
+  if (value === null || value === undefined || value === "") return fallback;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
 function normalizeMessage(message, index, conversationId) {
   return {
     id: typeof message.id === "string" && message.id ? message.id : createId(),
@@ -92,6 +118,12 @@ function serializeConversation(row, messages) {
     id: row.id,
     title: row.title,
     pinned: Boolean(row.pinned),
+    profile: row.profile ?? "general",
+    systemPrompt: row.system_prompt ?? "",
+    temperature: row.temperature,
+    contextWindow: row.context_window,
+    maxTokens: row.max_tokens,
+    model: row.model,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     messages: messages.map((message) => ({
@@ -154,6 +186,24 @@ function upsertConversation(payload) {
   const title = typeof payload.title === "string" && payload.title.trim()
     ? payload.title.trim().slice(0, 120)
     : existing?.title ?? "New local chat";
+  const profile = typeof payload.profile === "string" && payload.profile.trim()
+    ? payload.profile.trim().slice(0, 40)
+    : existing?.profile ?? "general";
+  const systemPrompt = typeof payload.systemPrompt === "string"
+    ? payload.systemPrompt.trim()
+    : existing?.systemPrompt ?? "";
+  const temperature = Object.hasOwn(payload, "temperature")
+    ? optionalNumber(payload.temperature)
+    : existing?.temperature ?? null;
+  const contextWindow = Object.hasOwn(payload, "contextWindow")
+    ? optionalNumber(payload.contextWindow)
+    : existing?.contextWindow ?? null;
+  const maxTokens = Object.hasOwn(payload, "maxTokens")
+    ? optionalNumber(payload.maxTokens)
+    : existing?.maxTokens ?? null;
+  const model = typeof payload.model === "string" && payload.model.trim()
+    ? payload.model.trim()
+    : existing?.model ?? null;
   const pinned = Object.hasOwn(payload, "pinned")
     ? payload.pinned === true || payload.pinned === 1
       ? 1
@@ -166,13 +216,34 @@ function upsertConversation(payload) {
   db.exec("BEGIN");
   try {
     db.prepare(`
-      INSERT INTO conversations (id, title, pinned, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO conversations (
+        id, title, pinned, profile, system_prompt, temperature, context_window,
+        max_tokens, model, created_at, updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         title = excluded.title,
         pinned = excluded.pinned,
+        profile = excluded.profile,
+        system_prompt = excluded.system_prompt,
+        temperature = excluded.temperature,
+        context_window = excluded.context_window,
+        max_tokens = excluded.max_tokens,
+        model = excluded.model,
         updated_at = excluded.updated_at
-    `).run(id, title, pinned, createdAt, updatedAt);
+    `).run(
+      id,
+      title,
+      pinned,
+      profile,
+      systemPrompt,
+      temperature,
+      contextWindow,
+      maxTokens,
+      model,
+      createdAt,
+      updatedAt
+    );
 
     db.prepare("DELETE FROM messages WHERE conversation_id = ?").run(id);
     const insertMessage = db.prepare(`
@@ -208,6 +279,12 @@ function patchConversation(id, payload) {
     ...existing,
     title: payload.title ?? existing.title,
     pinned: typeof payload.pinned === "boolean" ? payload.pinned : existing.pinned,
+    profile: payload.profile ?? existing.profile,
+    systemPrompt: payload.systemPrompt ?? existing.systemPrompt,
+    temperature: Object.hasOwn(payload, "temperature") ? payload.temperature : existing.temperature,
+    contextWindow: Object.hasOwn(payload, "contextWindow") ? payload.contextWindow : existing.contextWindow,
+    maxTokens: Object.hasOwn(payload, "maxTokens") ? payload.maxTokens : existing.maxTokens,
+    model: Object.hasOwn(payload, "model") ? payload.model : existing.model,
     messages: existing.messages
   });
 }
@@ -543,7 +620,8 @@ async function handleChat(req, res) {
         stream: true,
         options: {
           temperature: body.temperature,
-          num_ctx: body.contextWindow
+          num_ctx: body.contextWindow,
+          num_predict: body.maxTokens
         }
       })
     });
