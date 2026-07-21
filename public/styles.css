@@ -632,6 +632,7 @@ textarea:focus {
   color: #ff9b9b;
 }
 
+.app-dialog-backdrop,
 .settings-backdrop {
   position: fixed;
   inset: 0;
@@ -643,14 +644,24 @@ textarea:focus {
   backdrop-filter: blur(8px);
 }
 
+.app-dialog-backdrop {
+  z-index: 30;
+  background:
+    radial-gradient(circle at 50% 18%, rgba(80, 80, 80, 0.18), transparent 34%),
+    rgba(0, 0, 0, 0.72);
+}
+
+.app-dialog-backdrop[hidden],
 .settings-backdrop[hidden] {
   display: none;
 }
 
+.dialog-open,
 .settings-open {
   overflow: hidden;
 }
 
+.app-dialog,
 .settings-modal {
   display: grid;
   width: min(800px, 100%);
@@ -664,6 +675,15 @@ textarea:focus {
   box-shadow: var(--shadow);
 }
 
+.app-dialog {
+  width: min(560px, 100%);
+  gap: 14px;
+  overflow: hidden;
+  padding: 18px;
+  animation: dialog-enter 160ms ease-out;
+}
+
+.app-dialog-head,
 .settings-modal-head {
   display: flex;
   align-items: start;
@@ -673,6 +693,7 @@ textarea:focus {
   border-bottom: 1px solid var(--line-soft);
 }
 
+.app-dialog-head h2,
 .settings-modal-head h2 {
   margin: 0;
   font-size: 17px;
@@ -680,10 +701,80 @@ textarea:focus {
   line-height: 1.25;
 }
 
+.app-dialog-head p,
 .settings-modal-head p {
   margin: 3px 0 0;
   color: var(--muted-2);
   font-size: 12px;
+  line-height: 1.45;
+}
+
+.app-dialog-body {
+  display: grid;
+  gap: 10px;
+}
+
+.app-dialog-field {
+  min-height: 42px;
+  resize: vertical;
+  padding: 12px 13px;
+  border-color: #3a3a3a;
+  border-radius: 12px;
+  background: #101010;
+  color: #f2f2f2;
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+textarea.app-dialog-field {
+  min-height: 190px;
+}
+
+.app-dialog-preview {
+  overflow: hidden;
+  padding: 12px 13px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #111111;
+  color: #e6e6e6;
+  font-size: 13px;
+  line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-dialog-actions {
+  display: flex;
+  align-items: center;
+  justify-content: end;
+  gap: 10px;
+}
+
+.ghost-button.danger {
+  color: #ff9b9b;
+}
+
+.ghost-button.primary.danger {
+  border-color: rgba(255, 107, 107, 0.34);
+  background: rgba(255, 107, 107, 0.14);
+  color: #ffd1d1;
+}
+
+.ghost-button.primary.danger:hover {
+  background: rgba(255, 107, 107, 0.22);
+  color: #ffffff;
+}
+
+@keyframes dialog-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.985);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 .settings-section {

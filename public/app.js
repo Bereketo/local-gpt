@@ -46,6 +46,13 @@ const activeProfileLabel = document.querySelector("#activeProfileLabel");
 const settingsButton = document.querySelector("#settingsButton");
 const settingsBackdrop = document.querySelector("#settingsBackdrop");
 const closeSettingsButton = document.querySelector("#closeSettingsButton");
+const appDialogBackdrop = document.querySelector("#appDialogBackdrop");
+const appDialogTitle = document.querySelector("#appDialogTitle");
+const appDialogDescription = document.querySelector("#appDialogDescription");
+const appDialogBody = document.querySelector("#appDialogBody");
+const appDialogCloseButton = document.querySelector("#appDialogCloseButton");
+const appDialogCancelButton = document.querySelector("#appDialogCancelButton");
+const appDialogConfirmButton = document.querySelector("#appDialogConfirmButton");
 const conversationList = document.querySelector("#conversationList");
 const messagesEl = document.querySelector("#messages");
 const newChatButton = document.querySelector("#newChatButton");
@@ -122,6 +129,7 @@ let modelActionRunning = false;
 let autoStartAttempted = false;
 let streamRenderFrame = null;
 let streamSaveTimer = null;
+let activeDialog = null;
 const saveTimers = new Map();
 
 function loadState() {
@@ -266,7 +274,13 @@ async function renameActiveConversation() {
   const conversation = activeConversation();
   if (!conversation) return;
 
-  const title = prompt("Rename chat", conversation.title)?.trim();
+  const title = (await textDialog({
+    title: "Rename Chat",
+    description: "Give this conversation a concise name for the sidebar.",
+    value: conversation.title,
+    placeholder: "Conversation title",
+    confirmLabel: "Rename"
+  }))?.trim();
   if (!title) return;
 
   conversation.title = title.slice(0, 80);
@@ -280,7 +294,13 @@ async function deleteActiveConversation() {
   const conversation = activeConversation();
   if (!conversation) return;
 
-  const confirmed = confirm(`Delete "${conversation.title}"?`);
+  const confirmed = await confirmDialog({
+    title: "Delete Chat",
+    description: "This removes the conversation and its messages from Local GPT.",
+    preview: conversation.title,
+    confirmLabel: "Delete",
+    danger: true
+  });
   if (!confirmed) return;
 
   state.conversations = state.conversations.filter((item) => item.id !== conversation.id);
@@ -536,13 +556,23 @@ async function copyMessage(message) {
   }
 }
 
-function editMessage(message) {
+async function editMessage(message) {
   if (isStreaming) return;
   const conversation = activeConversation();
   if (!conversation) return;
   if (message.role === "user" && !hasRunnableModel()) return;
 
-  const edited = prompt("Edit message", message.content)?.trim();
+  const edited = (await textDialog({
+    title: message.role === "user" ? "Edit Prompt" : "Edit Response",
+    description: message.role === "user"
+      ? "Changing your prompt will regenerate the assistant response after it."
+      : "Update the saved assistant message.",
+    value: message.content,
+    placeholder: "Write your message...",
+    confirmLabel: message.role === "user" ? "Save & Regenerate" : "Save",
+    multiline: true,
+    rows: 8
+  }))?.trim();
   if (!edited) return;
 
   const index = conversation.messages.indexOf(message);
@@ -610,6 +640,77 @@ function renderMarkdownish(value) {
     .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
     .replace(/`([^`]+)`/g, "<code>$1</code>")
     .replace(/^\s*[-*] (.*)$/gm, "<div class=\"list-line\">• $1</div>");
+}
+
+function closeAppDialog(value = null) {
+  if (!activeDialog) return;
+  const { resolve, previousFocus } = activeDialog;
+  activeDialog = null;
+  appDialogBackdrop.hidden = true;
+  document.body.classList.remove("dialog-open");
+  appDialogBody.innerHTML = "";
+  previousFocus?.focus?.();
+  resolve(value);
+}
+
+function openAppDialog(options) {
+  if (activeDialog) closeAppDialog(null);
+
+  const previousFocus = document.activeElement;
+  appDialogTitle.textContent = options.title;
+  appDialogDescription.textContent = options.description ?? "";
+  appDialogConfirmButton.textContent = options.confirmLabel ?? "Save";
+  appDialogCancelButton.textContent = options.cancelLabel ?? "Cancel";
+  appDialogConfirmButton.classList.toggle("danger", options.danger === true);
+
+  appDialogBody.innerHTML = "";
+  const field = document.createElement(options.multiline ? "textarea" : "input");
+  field.className = "app-dialog-field";
+  field.value = options.value ?? "";
+  field.placeholder = options.placeholder ?? "";
+  if (field instanceof HTMLTextAreaElement) {
+    field.rows = options.rows ?? 7;
+  } else {
+    field.type = "text";
+  }
+
+  if (options.kind === "confirm") {
+    field.hidden = true;
+    const preview = document.createElement("div");
+    preview.className = "app-dialog-preview";
+    preview.textContent = options.preview ?? "";
+    if (options.preview) appDialogBody.append(preview);
+  } else {
+    appDialogBody.append(field);
+  }
+
+  appDialogBackdrop.hidden = false;
+  document.body.classList.add("dialog-open");
+
+  return new Promise((resolve) => {
+    activeDialog = {
+      field,
+      resolve,
+      previousFocus,
+      allowEmpty: options.allowEmpty === true
+    };
+    requestAnimationFrame(() => {
+      if (options.kind === "confirm") {
+        appDialogConfirmButton.focus();
+      } else {
+        field.focus();
+        field.select();
+      }
+    });
+  });
+}
+
+function confirmDialog(options) {
+  return openAppDialog({ ...options, kind: "confirm" }).then((value) => value === true);
+}
+
+function textDialog(options) {
+  return openAppDialog(options).then((value) => typeof value === "string" ? value : null);
 }
 
 function syncControls() {
@@ -988,7 +1089,13 @@ async function runModelAction(action) {
   }
 
   if (action === "delete-model") {
-    const confirmed = confirm(`Delete "${name}" from Ollama?`);
+    const confirmed = await confirmDialog({
+      title: "Delete Model",
+      description: "This asks Ollama to remove the selected model from disk.",
+      preview: name,
+      confirmLabel: "Delete",
+      danger: true
+    });
     if (!confirmed) return;
   }
 
@@ -1345,7 +1452,37 @@ settingsBackdrop.addEventListener("click", (event) => {
   if (event.target === settingsBackdrop) closeSettings();
 });
 
+appDialogCloseButton.addEventListener("click", () => closeAppDialog(null));
+appDialogCancelButton.addEventListener("click", () => closeAppDialog(null));
+appDialogConfirmButton.addEventListener("click", () => {
+  if (!activeDialog) return;
+  if (activeDialog.field.hidden) {
+    closeAppDialog(true);
+    return;
+  }
+
+  const value = activeDialog.field.value;
+  if (!activeDialog.allowEmpty && value.trim() === "") {
+    activeDialog.field.focus();
+    return;
+  }
+  closeAppDialog(value);
+});
+appDialogBackdrop.addEventListener("click", (event) => {
+  if (event.target === appDialogBackdrop) closeAppDialog(null);
+});
+appDialogBody.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+    event.preventDefault();
+    appDialogConfirmButton.click();
+  }
+});
+
 document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && activeDialog) {
+    closeAppDialog(null);
+    return;
+  }
   if (event.key === "Escape" && !settingsBackdrop.hidden) closeSettings();
 });
 
