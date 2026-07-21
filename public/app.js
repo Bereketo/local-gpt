@@ -6,6 +6,18 @@ const defaults = {
     ollama: "http://127.0.0.1:11434",
     "llama.cpp": "http://127.0.0.1:8080"
   },
+  autoStartProviders: {
+    ollama: true,
+    "llama.cpp": true
+  },
+  serverConfigs: {
+    "llama.cpp": {
+      modelPath: "",
+      port: 8080,
+      contextWindow: null,
+      gpuLayers: null
+    }
+  },
   selectedModels: {},
   activeConversationId: null,
   temperature: 0.7,
@@ -14,6 +26,7 @@ const defaults = {
 };
 
 const providerSelect = document.querySelector("#providerSelect");
+const autoStartToggle = document.querySelector("#autoStartToggle");
 const baseUrlInput = document.querySelector("#baseUrlInput");
 const modelSelect = document.querySelector("#modelSelect");
 const refreshModelsButton = document.querySelector("#refreshModelsButton");
@@ -106,6 +119,7 @@ let isStreaming = false;
 let currentAbortController = null;
 let providerHealth = null;
 let modelActionRunning = false;
+let autoStartAttempted = false;
 let streamRenderFrame = null;
 let streamSaveTimer = null;
 const saveTimers = new Map();
@@ -117,6 +131,15 @@ function loadState() {
       ...defaults,
       ...parsed,
       endpoints: { ...defaults.endpoints, ...(parsed?.endpoints ?? {}) },
+      autoStartProviders: { ...defaults.autoStartProviders, ...(parsed?.autoStartProviders ?? {}) },
+      serverConfigs: {
+        ...defaults.serverConfigs,
+        ...(parsed?.serverConfigs ?? {}),
+        "llama.cpp": {
+          ...defaults.serverConfigs["llama.cpp"],
+          ...(parsed?.serverConfigs?.["llama.cpp"] ?? {})
+        }
+      },
       selectedModels: parsed?.selectedModels ?? {},
       conversations: [],
       legacyConversations: parsed?.conversations ?? []
@@ -130,6 +153,8 @@ function saveState() {
   localStorage.setItem(storageKey, JSON.stringify({
     provider: state.provider,
     endpoints: state.endpoints,
+    autoStartProviders: state.autoStartProviders,
+    serverConfigs: state.serverConfigs,
     selectedModels: state.selectedModels,
     activeConversationId: state.activeConversationId,
     temperature: state.temperature,
@@ -162,6 +187,32 @@ function modelLabel(model) {
 
 function syncProviderSpecificControls() {
   llamaLauncher.hidden = state.provider !== "llama.cpp";
+}
+
+function llamaConfig() {
+  state.serverConfigs["llama.cpp"] = {
+    ...defaults.serverConfigs["llama.cpp"],
+    ...(state.serverConfigs["llama.cpp"] ?? {})
+  };
+  return state.serverConfigs["llama.cpp"];
+}
+
+function syncLlamaConfigFromInputs() {
+  const config = llamaConfig();
+  config.modelPath = llamaModelPathInput.value.trim();
+  config.port = optionalPositiveNumberInput(llamaPortInput) ?? 8080;
+  config.contextWindow = optionalPositiveNumberInput(llamaContextInput);
+  config.gpuLayers = optionalPositiveNumberInput(llamaGpuLayersInput);
+  state.endpoints["llama.cpp"] = `http://127.0.0.1:${config.port}`;
+}
+
+function canStartProvider(provider = state.provider) {
+  if (provider === "ollama") return true;
+  return Boolean(llamaConfig().modelPath || state.selectedModels["llama.cpp"]?.endsWith(".gguf"));
+}
+
+function shouldAutoStartProvider(provider = state.provider) {
+  return Boolean(state.autoStartProviders[provider] && canStartProvider(provider) && !autoStartAttempted);
 }
 
 function activeConversation() {
@@ -326,6 +377,9 @@ function renderSetupInstructions(instructions, health) {
   const commandHtml = instructions.commands
     .map((command) => `<code>${escapeHtml(command)}</code>`)
     .join("");
+  const startAction = canStartProvider(health?.provider)
+    ? `<button class="ghost-button primary" type="button" data-action="start-provider">Start server</button>`
+    : `<button class="ghost-button" type="button" data-action="open-settings">Open settings</button>`;
 
   return `
     <div class="setup-guide">
@@ -335,7 +389,10 @@ function renderSetupInstructions(instructions, health) {
         ${health?.details ? `<p class="setup-detail">${escapeHtml(health.details)}</p>` : ""}
       </div>
       <div class="command-stack">${commandHtml}</div>
-      <button class="ghost-button" type="button" data-action="refresh-health">Check again</button>
+      <div class="setup-actions">
+        ${startAction}
+        <button class="ghost-button" type="button" data-action="refresh-health">Check again</button>
+      </div>
     </div>
   `;
 }
@@ -557,8 +614,14 @@ function renderMarkdownish(value) {
 
 function syncControls() {
   providerSelect.value = state.provider;
+  autoStartToggle.checked = Boolean(state.autoStartProviders[state.provider]);
   baseUrlInput.value = state.endpoints[state.provider];
   conversationSearchInput.value = state.conversationSearch;
+  const config = llamaConfig();
+  llamaModelPathInput.value = config.modelPath;
+  llamaPortInput.value = config.port ?? 8080;
+  llamaContextInput.value = config.contextWindow ?? "";
+  llamaGpuLayersInput.value = config.gpuLayers ?? "";
   syncProviderSpecificControls();
   syncChatControls();
 }
@@ -761,8 +824,16 @@ async function refreshModels() {
   renderSetupPanel();
 
   try {
-    const response = await fetch(`/api/health?provider=${encodeURIComponent(provider)}&baseUrl=${encodeURIComponent(baseUrl)}`);
-    const data = await response.json();
+    let data = await fetchProviderHealth(provider, baseUrl);
+    if (!data.ok && shouldAutoStartProvider(provider)) {
+      providerHealth = { ...data, message: `Starting ${providerName(provider)}...` };
+      renderSetupPanel();
+      const started = await startProviderServer({ automatic: true });
+      if (started) {
+        data = await fetchProviderHealth(provider, state.endpoints[provider]);
+      }
+    }
+
     providerHealth = data;
     renderSetupPanel();
     if (!data.ok) throw new Error(data.details || data.message || "Unable to load models");
@@ -788,6 +859,11 @@ async function refreshModels() {
       ? savedModel
       : data.models[0].name;
     state.selectedModels[provider] = modelSelect.value;
+    if (provider === "llama.cpp" && modelSelect.value.endsWith(".gguf")) {
+      const config = llamaConfig();
+      config.modelPath = modelSelect.value;
+      llamaModelPathInput.value = modelSelect.value;
+    }
     const conversation = activeConversation();
     if (conversation && !conversation.model) {
       conversation.model = modelSelect.value;
@@ -812,6 +888,84 @@ async function refreshModels() {
       renderSetupPanel();
     }
     setStatus(`${providerName(provider)} is offline`, "error");
+  }
+}
+
+async function fetchProviderHealth(provider, baseUrl) {
+  const response = await fetch(`/api/health?provider=${encodeURIComponent(provider)}&baseUrl=${encodeURIComponent(baseUrl)}`);
+  return response.json();
+}
+
+async function startProviderServer({ automatic = false } = {}) {
+  if (modelActionRunning) return false;
+
+  const provider = state.provider;
+  const body = {
+    provider,
+    baseUrl: state.endpoints[provider]
+  };
+
+  if (provider === "llama.cpp") {
+    syncLlamaConfigFromInputs();
+    const config = llamaConfig();
+    body.modelPath = config.modelPath || state.selectedModels["llama.cpp"] || "";
+    body.port = config.port ?? 8080;
+    body.contextWindow = config.contextWindow;
+    body.gpuLayers = config.gpuLayers;
+
+    if (!body.modelPath) {
+      const message = "Add a GGUF model path in Settings before auto-starting llama.cpp.";
+      if (!automatic) {
+        updateLlamaStatus(message, "error");
+        llamaModelPathInput.focus();
+      }
+      setStatus(message, "error");
+      return false;
+    }
+  }
+
+  modelActionRunning = true;
+  autoStartAttempted = true;
+  startLlamaButton.disabled = true;
+  stopLlamaButton.disabled = true;
+  setStatus(`Starting ${providerName(provider)}...`);
+  if (provider === "llama.cpp") updateLlamaStatus("Starting llama.cpp server...");
+  renderSetupPanel();
+
+  try {
+    const result = await apiJson("/api/providers/start", {
+      method: "POST",
+      body: JSON.stringify(body)
+    });
+
+    const nextBaseUrl = result.status?.config?.baseUrl;
+    if (nextBaseUrl) {
+      state.endpoints[provider] = nextBaseUrl;
+      baseUrlInput.value = nextBaseUrl;
+    }
+    if (provider === "llama.cpp" && result.status?.config) {
+      const config = llamaConfig();
+      config.modelPath = result.status.config.modelPath ?? body.modelPath;
+      config.port = result.status.config.port ?? body.port;
+      config.contextWindow = result.status.config.contextWindow ?? body.contextWindow ?? null;
+      config.gpuLayers = result.status.config.gpuLayers ?? body.gpuLayers ?? null;
+      syncControls();
+      updateLlamaStatus(result.message ?? "llama.cpp server started.");
+    }
+
+    saveState();
+    if (!automatic) await refreshModels();
+    return true;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : `Failed to start ${providerName(provider)}`;
+    if (provider === "llama.cpp") updateLlamaStatus(message, "error");
+    setStatus(message, "error");
+    return false;
+  } finally {
+    modelActionRunning = false;
+    startLlamaButton.disabled = false;
+    stopLlamaButton.disabled = false;
+    renderSetupPanel();
   }
 }
 
@@ -885,6 +1039,10 @@ async function refreshLlamaStatus() {
     if (status.config?.gpuLayers !== null && status.config?.gpuLayers !== undefined) {
       llamaGpuLayersInput.value = status.config.gpuLayers;
     }
+    if (status.config) {
+      syncLlamaConfigFromInputs();
+      saveState();
+    }
 
     const label = status.config?.modelLabel ? ` · ${status.config.modelLabel}` : "";
     updateLlamaStatus(status.reachable ? `Server reachable${label}` : "No llama.cpp server reachable");
@@ -894,47 +1052,11 @@ async function refreshLlamaStatus() {
 }
 
 async function startLlamaServer() {
-  if (modelActionRunning) return;
-  const modelPath = llamaModelPathInput.value.trim();
-  if (!modelPath) {
-    updateLlamaStatus("Enter the path to a .gguf model file.", "error");
-    llamaModelPathInput.focus();
-    return;
-  }
-
-  modelActionRunning = true;
-  startLlamaButton.disabled = true;
-  stopLlamaButton.disabled = true;
-  updateLlamaStatus("Starting llama.cpp server...");
-  setStatus("Starting llama.cpp...");
-
-  try {
-    const port = optionalPositiveNumberInput(llamaPortInput) ?? 8080;
-    const result = await apiJson("/api/llama/start", {
-      method: "POST",
-      body: JSON.stringify({
-        modelPath,
-        port,
-        contextWindow: optionalPositiveNumberInput(llamaContextInput),
-        gpuLayers: optionalPositiveNumberInput(llamaGpuLayersInput)
-      })
-    });
-
-    state.provider = "llama.cpp";
-    state.endpoints["llama.cpp"] = result.status?.config?.baseUrl ?? `http://127.0.0.1:${port}`;
-    syncControls();
-    saveState();
-    updateLlamaStatus(result.message ?? "llama.cpp server started.");
-    await refreshModels();
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to start llama.cpp";
-    updateLlamaStatus(message, "error");
-    setStatus(message, "error");
-  } finally {
-    modelActionRunning = false;
-    startLlamaButton.disabled = false;
-    stopLlamaButton.disabled = false;
-  }
+  state.provider = "llama.cpp";
+  syncLlamaConfigFromInputs();
+  syncControls();
+  saveState();
+  await startProviderServer();
 }
 
 async function stopLlamaServer() {
@@ -1174,21 +1296,35 @@ function closeSettings() {
 }
 
 providerSelect.addEventListener("change", () => {
+  if (state.provider === "llama.cpp") syncLlamaConfigFromInputs();
   state.provider = providerSelect.value;
+  autoStartAttempted = false;
   syncControls();
   saveState();
   refreshModels();
   refreshLlamaStatus();
 });
 
+autoStartToggle.addEventListener("change", () => {
+  state.autoStartProviders[state.provider] = autoStartToggle.checked;
+  autoStartAttempted = false;
+  saveState();
+});
+
 baseUrlInput.addEventListener("change", () => {
   state.endpoints[state.provider] = baseUrlInput.value.replace(/\/$/, "");
+  autoStartAttempted = false;
   saveState();
   refreshModels();
 });
 
 modelSelect.addEventListener("change", () => {
   state.selectedModels[state.provider] = modelSelect.value;
+  if (state.provider === "llama.cpp" && modelSelect.value.endsWith(".gguf")) {
+    const config = llamaConfig();
+    config.modelPath = modelSelect.value;
+    llamaModelPathInput.value = modelSelect.value;
+  }
   updateActiveConversationSettings({ model: modelSelect.value });
   saveState();
 });
@@ -1196,6 +1332,13 @@ modelSelect.addEventListener("change", () => {
 refreshModelsButton.addEventListener("click", refreshModels);
 startLlamaButton.addEventListener("click", startLlamaServer);
 stopLlamaButton.addEventListener("click", stopLlamaServer);
+[llamaModelPathInput, llamaPortInput, llamaContextInput, llamaGpuLayersInput].forEach((input) => {
+  input.addEventListener("change", () => {
+    syncLlamaConfigFromInputs();
+    autoStartAttempted = false;
+    saveState();
+  });
+});
 settingsButton.addEventListener("click", openSettings);
 closeSettingsButton.addEventListener("click", closeSettings);
 settingsBackdrop.addEventListener("click", (event) => {
@@ -1213,6 +1356,8 @@ deleteChatButton.addEventListener("click", deleteActiveConversation);
 setupPanel.addEventListener("click", (event) => {
   const action = event.target instanceof HTMLElement ? event.target.dataset.action : "";
   if (action === "refresh-health") refreshModels();
+  if (action === "start-provider") startProviderServer();
+  if (action === "open-settings") openSettings();
   if (action === "pull-model" || action === "delete-model") runModelAction(action);
 });
 

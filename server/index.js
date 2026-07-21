@@ -14,9 +14,13 @@ const databasePath = process.env.DATABASE_PATH ?? path.join(dataDir, "local-gpt.
 const host = process.env.HOST ?? "127.0.0.1";
 const port = Number(process.env.PORT ?? 5173);
 const ollamaBaseUrl = process.env.OLLAMA_BASE_URL ?? "http://127.0.0.1:11434";
+const ollamaBinary = process.env.OLLAMA_BIN ?? "ollama";
 const llamaBaseUrl = process.env.LLAMA_CPP_BASE_URL ?? "http://127.0.0.1:8080";
 const llamaServerBinary = process.env.LLAMA_CPP_SERVER_BIN ?? "/opt/homebrew/bin/llama-server";
 
+let managedOllamaProcess = null;
+let managedOllamaConfig = null;
+let managedOllamaLog = "";
 let managedLlamaProcess = null;
 let managedLlamaConfig = null;
 let managedLlamaLog = "";
@@ -131,6 +135,15 @@ function llamaProcessStatus() {
     managed: Boolean(managedLlamaProcess),
     config: managedLlamaConfig,
     log: managedLlamaLog.slice(-4000)
+  };
+}
+
+function ollamaProcessStatus() {
+  return {
+    running: Boolean(managedOllamaProcess && managedOllamaProcess.exitCode === null),
+    managed: Boolean(managedOllamaProcess),
+    config: managedOllamaConfig,
+    log: managedOllamaLog.slice(-4000)
   };
 }
 
@@ -566,7 +579,7 @@ async function handleDeleteModel(req, res) {
   }
 }
 
-async function waitForLlamaServer(baseUrl, timeoutMs = 20000) {
+async function waitForLlamaServer(baseUrl, timeoutMs = 60000) {
   const startedAt = Date.now();
   let lastError = "";
 
@@ -584,24 +597,109 @@ async function waitForLlamaServer(baseUrl, timeoutMs = 20000) {
   throw new Error(lastError || "Timed out waiting for llama.cpp server");
 }
 
-async function handleLlamaStatus(_req, res) {
-  const baseUrl = managedLlamaConfig?.baseUrl ?? llamaBaseUrl;
-  const status = llamaProcessStatus();
+async function waitForOllamaServer(baseUrl, timeoutMs = 12000) {
+  const startedAt = Date.now();
+  let lastError = "";
+
+  while (Date.now() - startedAt < timeoutMs) {
+    try {
+      const response = await fetch(`${baseUrl}/api/tags`);
+      if (response.ok) return true;
+      lastError = `HTTP ${response.status}`;
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 400));
+  }
+
+  throw new Error(lastError || "Timed out waiting for Ollama");
+}
+
+async function handleOllamaStatus(_req, res) {
+  const baseUrl = managedOllamaConfig?.baseUrl ?? ollamaBaseUrl;
+  const status = ollamaProcessStatus();
   let reachable = false;
-  let health = null;
+  let modelCount = 0;
 
   try {
-    const response = await fetch(`${baseUrl}/health`);
+    const response = await fetch(`${baseUrl}/api/tags`);
+    const data = await response.json().catch(() => ({}));
     reachable = response.ok;
-    health = await response.json().catch(() => ({}));
+    modelCount = Array.isArray(data.models) ? data.models.length : 0;
   } catch {
     reachable = false;
   }
 
-  sendJson(res, 200, { ...status, reachable, baseUrl, health });
+  sendJson(res, 200, { ...status, reachable, baseUrl, modelCount });
 }
 
-async function handleStartLlama(req, res) {
+async function startOllamaServer(baseUrl) {
+  try {
+    const response = await fetch(`${baseUrl}/api/tags`);
+    if (response.ok) {
+      managedOllamaConfig = {
+        baseUrl,
+        binary: ollamaBinary,
+        external: true
+      };
+      return {
+        ok: true,
+        message: "Ollama is already running.",
+        status: ollamaProcessStatus()
+      };
+    }
+  } catch {
+    // Ollama is not reachable yet; continue and start it.
+  }
+
+  if (managedOllamaProcess && managedOllamaProcess.exitCode === null) {
+    return {
+      ok: true,
+      message: "Ollama is already starting.",
+      status: ollamaProcessStatus()
+    };
+  }
+
+  const url = new URL(baseUrl);
+  const ollamaHost = `${url.hostname}:${url.port || "11434"}`;
+  managedOllamaLog = "";
+  managedOllamaConfig = {
+    baseUrl,
+    host: ollamaHost,
+    binary: ollamaBinary
+  };
+
+  managedOllamaProcess = spawn(ollamaBinary, ["serve"], {
+    cwd: rootDir,
+    env: {
+      ...process.env,
+      OLLAMA_HOST: process.env.OLLAMA_HOST ?? ollamaHost
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+
+  managedOllamaProcess.stdout.on("data", (chunk) => {
+    managedOllamaLog = `${managedOllamaLog}${chunk.toString("utf8")}`.slice(-12000);
+  });
+  managedOllamaProcess.stderr.on("data", (chunk) => {
+    managedOllamaLog = `${managedOllamaLog}${chunk.toString("utf8")}`.slice(-12000);
+  });
+  managedOllamaProcess.on("error", (error) => {
+    managedOllamaLog = `${managedOllamaLog}\n${error.message}`.slice(-12000);
+  });
+  managedOllamaProcess.on("exit", (code, signal) => {
+    managedOllamaLog = `${managedOllamaLog}\nollama serve exited with ${signal ?? code}`.slice(-12000);
+  });
+
+  await waitForOllamaServer(baseUrl);
+  return {
+    ok: true,
+    message: "Started Ollama.",
+    status: ollamaProcessStatus()
+  };
+}
+
+async function handleStartOllama(req, res) {
   let body;
   try {
     body = await readJson(req);
@@ -610,6 +708,67 @@ async function handleStartLlama(req, res) {
     return;
   }
 
+  const baseUrl = resolveBaseUrl("ollama", body.baseUrl);
+  try {
+    sendJson(res, 200, await startOllamaServer(baseUrl));
+  } catch (error) {
+    if (managedOllamaProcess && managedOllamaProcess.exitCode === null) {
+      managedOllamaProcess.kill("SIGTERM");
+    }
+    sendJson(res, 502, {
+      error: "Failed to start Ollama",
+      details: error instanceof Error ? error.message : String(error),
+      log: managedOllamaLog.slice(-4000)
+    });
+  }
+}
+
+async function handleStopOllama(_req, res) {
+  if (!managedOllamaProcess || managedOllamaProcess.exitCode !== null) {
+    sendJson(res, 200, { ok: true, message: "No managed Ollama server is running." });
+    return;
+  }
+
+  managedOllamaProcess.kill("SIGTERM");
+  managedOllamaProcess = null;
+  sendJson(res, 200, { ok: true, message: "Stopped managed Ollama server." });
+}
+
+async function handleStartProvider(req, res) {
+  let body;
+  try {
+    body = await readJson(req);
+  } catch {
+    sendJson(res, 400, { error: "Request body must be valid JSON." });
+    return;
+  }
+
+  if (body.provider === "ollama") {
+    const baseUrl = resolveBaseUrl("ollama", body.baseUrl);
+    try {
+      sendJson(res, 200, await startOllamaServer(baseUrl));
+    } catch (error) {
+      if (managedOllamaProcess && managedOllamaProcess.exitCode === null) {
+        managedOllamaProcess.kill("SIGTERM");
+      }
+      sendJson(res, 502, {
+        error: "Failed to start Ollama",
+        details: error instanceof Error ? error.message : String(error),
+        log: managedOllamaLog.slice(-4000)
+      });
+    }
+    return;
+  }
+
+  if (body.provider === "llama.cpp") {
+    await startLlamaFromBody(body, res);
+    return;
+  }
+
+  sendJson(res, 400, { error: "Unsupported provider." });
+}
+
+async function startLlamaFromBody(body, res) {
   const modelPath = typeof body.modelPath === "string" ? body.modelPath.trim() : "";
   const hostValue = typeof body.host === "string" && body.host.trim() ? body.host.trim() : "127.0.0.1";
   const portValue = optionalNumber(body.port, 8080);
@@ -713,6 +872,35 @@ async function handleStartLlama(req, res) {
       log: managedLlamaLog.slice(-4000)
     });
   }
+}
+
+async function handleLlamaStatus(_req, res) {
+  const baseUrl = managedLlamaConfig?.baseUrl ?? llamaBaseUrl;
+  const status = llamaProcessStatus();
+  let reachable = false;
+  let health = null;
+
+  try {
+    const response = await fetch(`${baseUrl}/health`);
+    reachable = response.ok;
+    health = await response.json().catch(() => ({}));
+  } catch {
+    reachable = false;
+  }
+
+  sendJson(res, 200, { ...status, reachable, baseUrl, health });
+}
+
+async function handleStartLlama(req, res) {
+  let body;
+  try {
+    body = await readJson(req);
+  } catch {
+    sendJson(res, 400, { error: "Request body must be valid JSON." });
+    return;
+  }
+
+  await startLlamaFromBody(body, res);
 }
 
 async function handleStopLlama(_req, res) {
@@ -899,6 +1087,26 @@ const server = createServer(async (req, res) => {
 
   if (req.url?.startsWith("/api/models")) {
     await handleModels(req, res);
+    return;
+  }
+
+  if (req.url === "/api/providers/start" && req.method === "POST") {
+    await handleStartProvider(req, res);
+    return;
+  }
+
+  if (req.url === "/api/ollama/status" && req.method === "GET") {
+    await handleOllamaStatus(req, res);
+    return;
+  }
+
+  if (req.url === "/api/ollama/start" && req.method === "POST") {
+    await handleStartOllama(req, res);
+    return;
+  }
+
+  if (req.url === "/api/ollama/stop" && req.method === "POST") {
+    await handleStopOllama(req, res);
     return;
   }
 

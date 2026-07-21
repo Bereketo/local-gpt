@@ -480,6 +480,13 @@ button {
   gap: 12px;
 }
 
+.setup-actions {
+  display: flex;
+  align-items: center;
+  justify-content: end;
+  gap: 8px;
+}
+
 .setup-guide strong {
   display: block;
   color: var(--text);
@@ -589,9 +596,25 @@ textarea:focus {
 .provider-controls {
   display: grid;
   width: 100%;
-  grid-template-columns: 140px minmax(220px, 1fr) 190px 38px;
+  grid-template-columns: 140px 150px minmax(220px, 1fr) 190px 38px;
   align-items: end;
   gap: 10px;
+}
+
+.toggle-field {
+  min-height: 36px;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-content: end;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 9px;
+  color: #d6d6d6;
+}
+
+.toggle-field input {
+  width: 16px;
+  min-height: 16px;
+  accent-color: var(--accent);
 }
 
 .llama-launch-grid {
@@ -1085,7 +1108,7 @@ input:disabled {
   }
 
   .provider-controls {
-    grid-template-columns: 1fr 1fr 1fr auto;
+    grid-template-columns: 1fr 1fr auto;
   }
 
   .llama-launch-grid {
@@ -1099,6 +1122,11 @@ input:disabled {
 
   .endpoint-field {
     grid-column: 1 / -1;
+  }
+
+  .toggle-field {
+    align-content: center;
+    padding-bottom: 0;
   }
 
   .message,
